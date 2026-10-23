@@ -378,7 +378,30 @@ def run_feature_selection(
         )
         return score
 
-    study.optimize(objective, n_trials=n_trials, n_jobs=1)
+    round2_best_value: float | None = None
+    round2_best_trial: int | None = None
+    optuna_logger = optuna.logging.get_logger("automl_xgboost.round2")
+
+    def log_round2_best(_study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        nonlocal round2_best_value, round2_best_trial, round2_best_features
+        if (
+            trial.state != optuna.trial.TrialState.COMPLETE
+            or trial.value is None
+            or not math.isfinite(trial.value)
+        ):
+            return
+        if not is_better(float(trial.value), round2_best_value, metric.direction):
+            return
+        selected = list(trial.user_attrs.get("selected_features") or [])
+        round2_best_value = float(trial.value)
+        round2_best_trial = trial.number
+        message = (
+            "round2 iteration %d best is trial %d with value %.6f (%d features)"
+        )
+        logger.info(message, iteration, round2_best_trial, round2_best_value, len(selected))
+        optuna_logger.info(message, iteration, round2_best_trial, round2_best_value, len(selected))
+
+    study.optimize(objective, n_trials=n_trials, n_jobs=1, callbacks=[log_round2_best])
 
     if shared_study is not None:
         logger.info(
