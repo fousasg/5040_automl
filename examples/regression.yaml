@@ -10,7 +10,7 @@ seed: 42
 output_dir: ../runs/regression
 output_format: csv
 explain_sample_size: 80
-n_jobs: 2
+n_jobs: -1
 
 # Monotonicity constraints (optional):
 # 1 = monotonically increasing, -1 = monotonically decreasing
@@ -20,8 +20,8 @@ monotonicity_constraints:
 
 # Feature selection / iterative optimization (optional):
 iterations: 10
-refine_factor: 0.9        # narrow round1 search space by 50% each iteration
+refine_factor: 0.9        # narrow round1 search space by 10% each iteration
 feature_selection: true
-feature_selection_trials: 50
+feature_selection_trials: 10
 max_selected_features: 3
 
