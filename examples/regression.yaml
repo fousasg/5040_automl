@@ -1,0 +1,27 @@
+dataset: ../data/test_regression_with_nulls.csv
+target: target
+task: regression
+scorer: rmse
+predictors: [age, income, tenure, region, noise]
+algorithms: [xgboost]
+n_folds: 4
+n_trials: 10
+seed: 42
+output_dir: ../runs/regression
+output_format: csv
+explain_sample_size: 80
+n_jobs: 2
+
+# Monotonicity constraints (optional):
+# 1 = monotonically increasing, -1 = monotonically decreasing
+# Only numeric predictors can be constrained.
+monotonicity_constraints:
+  tenure: 1
+
+# Feature selection / iterative optimization (optional):
+iterations: 10
+refine_factor: 0.9        # narrow round1 search space by 50% each iteration
+feature_selection: true
+feature_selection_trials: 50
+max_selected_features: 3
+
