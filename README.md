@@ -22,7 +22,7 @@ Targets and fold columns may not contain nulls. Numeric and categorical predicto
 No Java installation is required.
 
 ```bash
-cd gpt_56_sol_noh2o
+cd 5040_automl
 
 conda create --name automl-xgboost --channel conda-forge python=3.11 pip --yes
 conda activate automl-xgboost
@@ -40,7 +40,7 @@ automl-xgboost run --config examples/regression.yaml
 automl-xgboost run --config examples/classification.yaml
 ```
 
-Results are written under `runs/`. Each example uses two trials for a practical smoke test; increase `n_trials` for real model selection.
+Results are written under `runs/`. The bundled example configs keep trial counts low enough for smoke tests; increase `n_trials` and `feature_selection_trials` for real model selection.
 
 Reactivate or remove the environment later:
 
@@ -189,9 +189,10 @@ The pipeline preserves predictor nulls as `NaN`/missing categories. XGBoost lear
 - `full_data_predictions.*`: in-sample predictions from the model fitted on all rows
 - `shap_values.*`: one contribution per predictor plus `BiasTerm`, on raw-margin scale
 - `shap_report.html` and `shap_assets/`: global importance, beeswarm, and local waterfall views
-- `optimization_history.html`, `optimization_progress.png`, and `trials.csv`
+- `optimization_history.html`, `optimization_progress.png` (log-scale y axis), and `trials.csv`
 - `actual_vs_predicted.png` for regression or `confusion_matrix.png` for classification, calculated from out-of-fold predictions
 - `partial_dependence_top10.png`: one-way PDP panels for up to 10 predictors ranked by fitted XGBoost importance; curves average over a deterministic sample of at most 1,000 rows
+- `variable_importance.*` and `variable_importance.png`: fitted-model feature importance values and a ranked bar chart
 - `model.json` and `model_metadata.json`, including categorical/class domains
 - `resolved_config.yaml`, `run_metadata.json`, `folds.*`, `run.log`, `optuna.db`, and `manifest.json`
 
