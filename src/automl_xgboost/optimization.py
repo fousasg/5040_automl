@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from .config import AutoMLConfig
 from .data import PreparedData
@@ -264,10 +265,6 @@ def run_feature_selection(
         f"feat__{idx:03d}": name for idx, name in enumerate(all_features)
     }
 
-    def constraints_func(frozen_trial: optuna.trial.FrozenTrial) -> tuple[float]:
-        violation = float(frozen_trial.user_attrs.get("cap_violation", 0.0))
-        return (violation,)
-
     if shared_study is not None:
         study = shared_study
     else:
@@ -277,7 +274,6 @@ def run_feature_selection(
             sampler = optuna.samplers.TPESampler(
                 seed=config.seed + 1000 * iteration,
                 multivariate=True,
-                constraints_func=constraints_func,
             )
         study = optuna.create_study(direction=metric.direction, sampler=sampler)
 
@@ -294,8 +290,11 @@ def run_feature_selection(
         len(active_set), len(all_features), ",".join(active_features),
     )
 
+    anchor_trial_number = trials_before
+
     def objective(trial: optuna.trial.Trial) -> float:
         started = time.perf_counter()
+        is_anchor = trial.number == anchor_trial_number
         selected = []
         for flag_key, feat_name in feature_flag_keys.items():
             if trial.suggest_int(flag_key, 0, 1) == 1:
@@ -323,7 +322,7 @@ def run_feature_selection(
             )
             return worst_score(metric.direction)
 
-        if trial.number == 0:
+        if is_anchor:
             raw_score = base_score
         else:
             try:
@@ -388,15 +387,16 @@ def run_feature_selection(
         )
 
     complete = [
-        t for t in study.trials
+        t for t in study.trials[trials_before:]
         if t.state == optuna.trial.TrialState.COMPLETE
         and t.value is not None
         and math.isfinite(t.value)
     ]
     logger.info(
-        "feature selection round2 study finished: %d/%d scored trials",
+        "feature selection round2 iteration %d finished: %d/%d new scored trials",
+        iteration,
         len(complete),
-        len(study.trials),
+        len(study.trials) - trials_before,
     )
 
     if not complete:
@@ -449,17 +449,12 @@ def run_iterative_optimization(
         search_state = build_search_state()
         logger.info("built search state for round1 refinement (refine_factor=%.2f)", config.refine_factor)
     if config.feature_selection and config.iterations > 1:
-        def r2_constraints_func(frozen_trial: optuna.trial.FrozenTrial) -> tuple[float]:
-            violation = float(frozen_trial.user_attrs.get("cap_violation", 0.0))
-            return (violation,)
-
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*experimental.*", category=FutureWarning)
             warnings.filterwarnings("ignore", message=".*experimental.*", module="optuna")
             r2_sampler = optuna.samplers.TPESampler(
                 seed=config.seed + 9999,
                 multivariate=True,
-                constraints_func=r2_constraints_func,
             )
         r2_shared_study = optuna.create_study(direction=metric.direction, sampler=r2_sampler)
         logger.info("created shared round2 study for feature selection across iterations")
