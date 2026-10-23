@@ -21,10 +21,11 @@ OWNED_FILES = {
     "manifest.json", "failure.json", "resolved_config.yaml", "run_metadata.json",
     "folds.csv", "folds.parquet", "trials.csv", "optimization_history.html",
     "optimization_progress.png", "cv_predictions.csv", "cv_predictions.parquet",
-    "full_data_predictions.csv", "full_data_predictions.parquet", "shap_values.csv",
-    "shap_values.parquet", "shap_report.html", "model.json", "model_metadata.json",
-    "actual_vs_predicted.png", "confusion_matrix.png", "partial_dependence_top10.png",
-    "optuna.db", "run.log",
+    "full_data_predictions.csv", "full_data_predictions.parquet",
+    "shap_values.csv", "shap_values.parquet", "shap_report.html", "model.json",
+    "model_metadata.json", "actual_vs_predicted.png", "confusion_matrix.png",
+    "partial_dependence_top10.png", "variable_importance.csv", "variable_importance.parquet",
+    "variable_importance.png", "optuna.db", "run.log",
 }
 OWNED_DIRECTORIES = {"shap_assets"}
 

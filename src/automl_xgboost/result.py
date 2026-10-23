@@ -18,6 +18,8 @@ class AutoMLArtifacts:
     full_data_predictions: Path
     performance_plot: Path
     partial_dependence_plot: Path
+    variable_importance: Path
+    variable_importance_plot: Path
     shap_values: Path
     shap_report: Path
     model: Path

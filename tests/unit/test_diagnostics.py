@@ -6,6 +6,7 @@ from automl_xgboost.data import prepare_data
 from automl_xgboost.diagnostics import (
     write_partial_dependence_plot,
     write_performance_plot,
+    write_variable_importance_artifacts,
 )
 
 
@@ -43,12 +44,19 @@ def test_writes_regression_performance_and_ranked_pdp(tmp_path):
     pdp, ranked = write_partial_dependence_plot(
         FakeRegressor(), data, config, tmp_path, grid_points=4, sample_size=4
     )
+    importance, importance_plot = write_variable_importance_artifacts(
+        FakeRegressor(), config, tmp_path, "csv"
+    )
 
     assert performance.name == "actual_vs_predicted.png"
     assert performance.stat().st_size > 0
     assert pdp.name == "partial_dependence_top10.png"
     assert pdp.stat().st_size > 0
     assert ranked == ["category", "numeric"]
+    assert importance.name == "variable_importance.csv"
+    assert importance_plot.name == "variable_importance.png"
+    assert importance_plot.stat().st_size > 0
+    assert pd.read_csv(importance)["feature"].tolist() == ["category", "numeric"]
 
 
 def test_writes_classification_confusion_matrix(tmp_path):

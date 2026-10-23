@@ -20,7 +20,11 @@ from .artifacts import (
 )
 from .config import AutoMLConfig
 from .data import PreparedData, load_dataset, prepare_data
-from .diagnostics import write_partial_dependence_plot, write_performance_plot
+from .diagnostics import (
+    write_partial_dependence_plot,
+    write_performance_plot,
+    write_variable_importance_artifacts,
+)
 from .exceptions import AutoMLError, TrainingError
 from .metrics import get_metric
 from .modeling import predict_for_score
@@ -116,6 +120,9 @@ def run_automl(config: AutoMLConfig | dict[str, Any]) -> AutoMLResult:
         partial_dependence_path, partial_dependence_features = write_partial_dependence_plot(
             model, sliced_data, sliced_config, run_dir
         )
+        variable_importance_path, variable_importance_plot_path = write_variable_importance_artifacts(
+            model, sliced_config, run_dir, config.output_format
+        )
 
         shap_started = time.perf_counter()
         explanation, shap_frame = compute_shap_values(model, sliced_data)
@@ -197,6 +204,8 @@ def run_automl(config: AutoMLConfig | dict[str, Any]) -> AutoMLResult:
             (full_path, table_media, len(data.source)),
             (performance_path, "image/png", None),
             (partial_dependence_path, "image/png", None),
+            (variable_importance_path, table_media, len(active_predictors)),
+            (variable_importance_plot_path, "image/png", None),
             (shap_path, table_media, len(data.source)),
             (report_path, "text/html", None),
             (model_path, "application/json", None),
@@ -224,6 +233,8 @@ def run_automl(config: AutoMLConfig | dict[str, Any]) -> AutoMLResult:
             full_data_predictions=full_path,
             performance_plot=performance_path,
             partial_dependence_plot=partial_dependence_path,
+            variable_importance=variable_importance_path,
+            variable_importance_plot=variable_importance_plot_path,
             shap_values=shap_path,
             shap_report=report_path,
             model=model_path,

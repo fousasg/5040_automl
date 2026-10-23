@@ -223,34 +223,48 @@ def write_trials_artifacts(
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        fig, ax = plt.subplots(figsize=(12, 7))
         colors = {"round1": "tab:blue", "round2": "tab:orange", "single": "tab:blue"}
-        for name in rounds:
-            subset = complete[complete["round"] == name]
-            ax.scatter(
-                subset["x"].tolist(),
-                subset["penalized_score"].tolist(),
-                label=f"{name} score",
-                color=colors.get(name, "tab:gray"),
-            )
         incumbents = running_best(
             [float(v) for v in complete["penalized_score"].tolist()], direction
         )
-        ax.plot(
-            complete["x"].tolist(), incumbents,
-            label="running best", linewidth=2, color="black",
-        )
-        _iteration_axis(ax)
-        ax.set(
-            title=f"XGBoost combined OOF {scorer}",
-            ylabel=scorer,
-        )
-        ax.grid(alpha=0.25)
-        ax.legend(loc="upper left")
-        fig.tight_layout()
+
+        def _positive_for_log(values: list[float]) -> list[float]:
+            positives = [float(value) for value in values if float(value) > 0]
+            floor = min(positives) / 10 if positives else 1e-12
+            return [float(value) if float(value) > 0 else floor for value in values]
+
+        def _draw_progress(path: Path, *, log_y: bool) -> None:
+            fig, ax = plt.subplots(figsize=(12, 7))
+            for name in rounds:
+                subset = complete[complete["round"] == name]
+                scores = [float(value) for value in subset["penalized_score"].tolist()]
+                ax.scatter(
+                    subset["x"].tolist(),
+                    _positive_for_log(scores) if log_y else scores,
+                    label=f"{name} score",
+                    color=colors.get(name, "tab:gray"),
+                )
+            ax.plot(
+                complete["x"].tolist(), _positive_for_log(incumbents) if log_y else incumbents,
+                label="running best", linewidth=2, color="black",
+            )
+            _iteration_axis(ax)
+            ax.set(
+                title=f"XGBoost combined OOF {scorer} (log scale)",
+                ylabel=scorer,
+            )
+            if log_y:
+                ax.set_yscale("log")
+            ax.grid(alpha=0.25)
+            ax.legend(loc="upper left")
+            fig.tight_layout()
+            fig.savefig(path, dpi=150)
+            plt.close(fig)
+
         progress = run_dir / "optimization_progress.png"
-        fig.savefig(progress, dpi=150)
-        plt.close(fig)
+        _draw_progress(progress, log_y=True)
+    except ArtifactError:
+        raise
     except Exception as exc:
         raise ArtifactError(f"could not create optimization PNG: {exc}") from exc
     finally:

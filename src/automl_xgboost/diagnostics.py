@@ -93,6 +93,35 @@ def write_performance_plot(
         plt.close(figure)
 
 
+def write_variable_importance_artifacts(
+    model: Any,
+    config: AutoMLConfig,
+    run_dir: Path,
+    output_format: str,
+) -> tuple[Path, Path]:
+    """Write fitted-model feature importance values and a ranked bar chart."""
+
+    frame = _variable_importance_frame(model, config)
+    table_path = _write_importance_table(frame, run_dir, output_format)
+    plt = _pyplot(run_dir)
+    figure, axis = plt.subplots(figsize=(10, max(4, 0.35 * len(frame))))
+    try:
+        plot_frame = frame.sort_values("importance", ascending=True)
+        axis.barh(plot_frame["feature"], plot_frame["importance"], color="tab:blue")
+        axis.set(
+            title="XGBoost variable importance",
+            xlabel="Feature importance",
+            ylabel="Feature",
+        )
+        axis.grid(axis="x", alpha=0.25)
+        figure.tight_layout()
+        plot_path = run_dir / "variable_importance.png"
+        _save_png(figure, plot_path)
+        return table_path, plot_path
+    finally:
+        plt.close(figure)
+
+
 def write_partial_dependence_plot(
     model: Any,
     data: PreparedData,
@@ -198,6 +227,36 @@ def _partial_dependence(
             raise ArtifactError(f"PDP prediction failed for predictor {feature!r}")
         averages.append(float(np.mean(prediction)))
     return x_values, np.asarray(averages, dtype=float), categorical
+
+
+def _variable_importance_frame(model: Any, config: AutoMLConfig) -> pd.DataFrame:
+    importances = np.asarray(getattr(model, "feature_importances_", []), dtype=float)
+    if importances.shape != (len(config.predictors),) or not np.isfinite(importances).all():
+        raise ArtifactError("XGBoost returned invalid feature importances")
+    total = float(importances.sum())
+    frame = pd.DataFrame(
+        {
+            "feature": config.predictors,
+            "importance": importances,
+            "normalized_importance": importances / total if total > 0 else np.zeros_like(importances),
+        }
+    )
+    return frame.sort_values(["importance", "feature"], ascending=[False, True]).reset_index(drop=True)
+
+
+def _write_importance_table(frame: pd.DataFrame, run_dir: Path, output_format: str) -> Path:
+    path = run_dir / f"variable_importance.{output_format}"
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        if output_format == "parquet":
+            frame.to_parquet(temporary, index=False, engine="pyarrow")
+        else:
+            frame.to_csv(temporary, index=False)
+        temporary.replace(path)
+        return path
+    except Exception as exc:
+        temporary.unlink(missing_ok=True)
+        raise ArtifactError(f"could not write {path.name}: {exc}") from exc
 
 
 def _sample_features(features: pd.DataFrame, sample_size: int, seed: int) -> pd.DataFrame:

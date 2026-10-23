@@ -45,11 +45,15 @@ def test_real_pipeline_with_nulls(tmp_path, filename, target, task, scorer, pred
     assert result.artifacts.shap_report.is_file()
     assert result.artifacts.performance_plot.is_file()
     assert result.artifacts.partial_dependence_plot.is_file()
+    assert result.artifacts.variable_importance.is_file()
+    assert result.artifacts.variable_importance_plot.is_file()
     expected_performance_name = "actual_vs_predicted.png" if task == "regression" else "confusion_matrix.png"
     assert result.artifacts.performance_plot.name == expected_performance_name
     manifest_paths = {artifact["path"] for artifact in manifest["artifacts"]}
     assert expected_performance_name in manifest_paths
     assert "partial_dependence_top10.png" in manifest_paths
+    assert f"variable_importance.{config.output_format}" in manifest_paths
+    assert "variable_importance.png" in manifest_paths
 
     scored = score_saved_model(
         result.output_dir,
