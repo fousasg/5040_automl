@@ -96,6 +96,7 @@ Five fields control the behavior:
 | `refine_factor` | float | `0.5` | Fraction to narrow the Round 1 hyper-parameter search space each iteration (0 < value <= 1) |
 | `feature_selection_trials` | int | `n_trials` | Optuna trials for the feature-selection round (defaults to `n_trials` when omitted) |
 | `max_selected_features` | int | none | Optional cap on how many features Round 2 can select |
+| `round1b_iterations` | int | `1` | Number of iterations (from iteration 1) in which the importance-based backward elimination (round1b) runs. `0` disables it; `1` runs it only in the first iteration; values > 1 run it in the first N iterations. Features eliminated by round1b are permanently removed from the Round 2 candidate pool in every later iteration. |
 
 With the defaults (`iterations: 1`, `feature_selection: false`), behavior is identical to the original single-pass pipeline.
 

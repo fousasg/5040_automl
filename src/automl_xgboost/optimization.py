@@ -28,6 +28,12 @@ from .modeling import (
 from .recording import TrialRecorder
 
 
+# Number of consecutive failed feature-removal attempts tolerated before the
+# importance-based backward elimination stops. A failure does not abort the
+# search; the next least-important feature is tried instead.
+ELIMINATION_FAILURE_PATIENCE = 3
+
+
 @dataclass(slots=True)
 class OptimizationOutcome:
     study: Any
@@ -422,6 +428,148 @@ def run_feature_selection(
     return list(best_selected), float(best_trial.value)
 
 
+def run_round1b_elimination(
+    data: PreparedData,
+    config: AutoMLConfig,
+    metric: MetricSpec,
+    best_parameters: dict[str, Any],
+    base_score: float,
+    active_features: list[str],
+    iteration: int,
+    logger: logging.Logger,
+    recorder: TrialRecorder | None = None,
+) -> tuple[list[str], float]:
+    """Backward feature elimination driven by XGBoost variable importance.
+
+    Runs as "round1b" for the first ``config.round1b_iterations`` iterations,
+    right after Round 1 and before the Optuna-based Round 2. Fits a model with
+    the winning parameters on all active predictors, ranks them by
+    fitted-model importance (most -> least), and tries dropping them in order
+    of increasing importance (least important first). Each candidate subset is
+    scored via the shared cross-validation folds. A drop is accepted when the
+    score is the same (within tolerance) or better than the current score.
+    A drop that degrades the score does NOT stop the search: that feature is
+    kept and the next least-important feature is tried instead. The search
+    stops only after ``ELIMINATION_FAILURE_PATIENCE`` consecutive failures, so
+    a later (more important) feature can still be dropped if doing so improves
+    the score. Every feature dropped here is permanently removed from the
+    candidate pool for all subsequent iterations.
+    """
+    import types
+
+    ranking_model = create_model(config, best_parameters, active_features)
+    ranking_model.fit(
+        data.features[active_features], data.encoded_target, verbose=False
+    )
+    importances = np.asarray(
+        getattr(ranking_model, "feature_importances_", []), dtype=float
+    )
+    if importances.shape != (len(active_features),) or not np.isfinite(importances).all():
+        raise TrainingError("XGBoost returned invalid feature importances for selection")
+
+    # Rank most -> least important; tie-break by name (matches variable_importance.csv).
+    ranked = [
+        name for _, name in sorted(
+            zip(importances, active_features),
+            key=lambda pair: (-float(pair[0]), pair[1]),
+        )
+    ]
+    # Removal order: least important first (the "last variable of the variable
+    # importance" at each step). The importance ranking is computed once from the
+    # Round 1 model and reused for every elimination step.
+    removal_order = list(reversed(ranked))
+    logger.info(
+        "round2 importance ranking (iteration %d, %d features): %s",
+        iteration, len(ranked), ",".join(ranked),
+    )
+
+    # Keep the surviving features in their original active_features order so that
+    # the OOF score recomputed in refit_best matches the Round 1 score (XGBoost
+    # column sampling by index is order-sensitive).
+    current_features = list(active_features)
+    current_score = float(base_score)
+    rel_tol = config.refit_score_relative_tolerance
+    abs_tol = config.refit_score_absolute_tolerance
+
+    def _same_or_better(new: float, reference: float) -> bool:
+        return is_better(new, reference, metric.direction) or math.isclose(
+            new, reference, rel_tol=rel_tol, abs_tol=abs_tol
+        )
+
+    step = 0
+    consecutive_failures = 0
+    while (
+        len(current_features) > 1
+        and step < len(removal_order)
+        and consecutive_failures < ELIMINATION_FAILURE_PATIENCE
+    ):
+        removed = removal_order[step]
+        candidate = [feature for feature in current_features if feature != removed]
+        started = time.perf_counter()
+        try:
+            predictions = cross_validated_predictions(
+                data, config, best_parameters, candidate
+            )
+            score = score_predictions(
+                metric, data.encoded_target.to_numpy(dtype=float), predictions
+            )
+        except Exception as exc:
+            logger.warning(
+                "round1b elimination iteration %d step %d failed removing %s: %s",
+                iteration, step, removed, exc,
+            )
+            if recorder is not None:
+                recorder.add(
+                    trial=types.SimpleNamespace(number=step),
+                    round_name="round1b",
+                    iteration=iteration,
+                    raw_score=None,
+                    penalized_score=worst_score(metric.direction),
+                    selected_features=candidate,
+                )
+            # Treat a training failure like a degradation: keep the feature,
+            # count it toward the patience budget, and try the next candidate.
+            consecutive_failures += 1
+            step += 1
+            continue
+
+        accepted = _same_or_better(score, current_score)
+        logger.info(
+            "round1b elimination iteration %d step %d: removed=%s candidate=%d features "
+            "score=%.6f previous=%.6f accepted=%s consecutive_failures=%d duration=%.2fs",
+            iteration, step, removed, len(candidate), score, current_score, accepted,
+            consecutive_failures + (0 if accepted else 1),
+            time.perf_counter() - started,
+        )
+        if recorder is not None:
+            recorder.add(
+                trial=types.SimpleNamespace(number=step),
+                round_name="round1b",
+                iteration=iteration,
+                raw_score=score,
+                penalized_score=score,
+                selected_features=candidate,
+            )
+        if accepted:
+            current_features = candidate
+            current_score = score
+            consecutive_failures = 0
+        else:
+            # Degrade: keep `removed`, do not stop -- try the next least-important
+            # feature. Stop only after ELIMINATION_FAILURE_PATIENCE consecutive
+            # failures.
+            consecutive_failures += 1
+        step += 1
+
+    logger.info(
+        "round1b elimination iteration %d finished: %d features score=%.6f "
+        "steps_tried=%d consecutive_failures=%d selected=%s",
+        iteration, len(current_features), current_score, step, consecutive_failures,
+        ",".join(current_features),
+    )
+    return current_features, current_score
+
+
 def run_iterative_optimization(
     data: PreparedData,
     config: AutoMLConfig,
@@ -442,6 +590,11 @@ def run_iterative_optimization(
     max_selected = config.max_selected_features
     recorder = TrialRecorder(config)
     trials_history: list[tuple[str, int, Any]] = []
+
+    # Features permanently removed by the round1b elimination (first iteration
+    # only). They are excluded from the Round 2 candidate pool in every
+    # subsequent iteration so they can never be re-selected.
+    eliminated_by_round1b: set[str] = set()
 
     r2_shared_study: Any | None = None
     search_state: dict[str, dict[str, Any]] | None = None
@@ -500,16 +653,56 @@ def run_iterative_optimization(
         iter_features = list(active_features)
         iter_trial = round1_outcome.best_trial_number
 
+        # Round 1b: importance-based backward elimination. Runs in the first
+        # ``config.round1b_iterations`` iterations (0 disables it). Features
+        # dropped here are permanently removed from all future iterations.
+        if config.feature_selection and iteration <= config.round1b_iterations:
+            logger.info(
+                "iteration %d/%d: round1b (importance-based feature elimination) from %d "
+                "currently active features",
+                iteration, config.iterations, len(active_features),
+            )
+            r1b_features, r1b_score = run_round1b_elimination(
+                data, config, metric, round1_params, round1_raw_score,
+                active_features=active_features,
+                iteration=iteration,
+                logger=logger,
+                recorder=recorder,
+            )
+            newly_eliminated = set(active_features) - set(r1b_features)
+            if newly_eliminated:
+                eliminated_by_round1b |= newly_eliminated
+                logger.info(
+                    "iteration %d round1b permanently eliminated %d features: %s",
+                    iteration, len(newly_eliminated), ",".join(sorted(newly_eliminated)),
+                )
+            # The survivors become the active set for round2 and all future rounds.
+            active_features = list(r1b_features)
+            iter_features = list(r1b_features)
+            iter_score = _penalize(r1b_score, len(r1b_features))
+            # Round 2 anchors on the post-elimination baseline.
+            round1_raw_score = r1b_score
+            logger.info(
+                "iteration %d round1b finished: %d features score=%.6f selected=%s",
+                iteration, len(r1b_features), r1b_score, ",".join(r1b_features),
+            )
+
         if config.feature_selection:
+            # Round 2 candidate pool: all original predictors except those
+            # permanently eliminated by round1b, so they can never be re-selected.
+            round2_candidates = [
+                feature for feature in config.predictors
+                if feature not in eliminated_by_round1b
+            ]
             logger.info(
                 "iteration %d/%d: round2 (feature selection) from %d candidates, "
                 "%d currently active",
-                iteration, config.iterations, len(config.predictors),
+                iteration, config.iterations, len(round2_candidates),
                 len(active_features),
             )
             r2_features, r2_score = run_feature_selection(
                 data, config, metric, round1_params, round1_raw_score,
-                all_features=list(config.predictors),
+                all_features=round2_candidates,
                 active_features=active_features,
                 iteration=iteration,
                 logger=logger,
@@ -520,12 +713,12 @@ def run_iterative_optimization(
                 "iteration %d round2 best score: %.6f with %d features: %s",
                 iteration, r2_score, len(r2_features), ",".join(r2_features),
             )
-            if is_better(r2_score, round1_penalized, metric.direction):
+            if is_better(r2_score, iter_score, metric.direction):
                 iter_features = r2_features
                 iter_score = r2_score
                 logger.info("iteration %d: round2 wins", iteration)
             else:
-                logger.info("iteration %d: round1 wins", iteration)
+                logger.info("iteration %d: round1/round1b wins", iteration)
 
         active_features = list(iter_features)
         prev_iter_best_params = dict(iter_params)
