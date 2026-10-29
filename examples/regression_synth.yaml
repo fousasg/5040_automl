@@ -1,0 +1,30 @@
+dataset: ../data/synth_regression.csv
+target: target
+task: regression
+scorer: rmse
+predictors: [s_cont1,s_cont2,s_cont3,s_cont4,s_int1,s_int2,s_int3,s_cat1,s_cat2,s_cat3,w_cont1,w_cont2,w_cont3,w_cont4,w_cont5,w_cont6,w_cont7,w_int1,w_int2,w_int3,w_int4,w_int5,w_int6,w_cat1,w_cat2,w_cat3,w_cat4,w_cat5,w_cat6,w_cat7,n_cont1,n_cont2,n_cont3,n_int1,n_int2,n_int3,n_cat1,n_cat2,n_cat3,n_cat4]
+algorithms: [xgboost]
+n_folds: 6
+n_trials: 100
+seed: 42
+output_dir: ../runs/regression_synth_f6_all_onlyhyper
+output_format: csv
+explain_sample_size: 80
+n_jobs: 10
+
+# Monotonicity constraints (optional):
+# 1 = monotonically increasing, -1 = monotonically decreasing
+# Only numeric predictors can be constrained.
+monotonicity_constraints:
+  s_cont1: 1
+  s_int1: 1
+
+# Feature selection / iterative optimization (optional):
+iterations: 1
+refine_factor: 0.99        # narrow round1 search space by 10% each iteration
+feature_selection: false
+feature_selection_trials: 10
+max_selected_features: 50
+
+round1b_iterations: 0
+

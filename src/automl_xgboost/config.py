@@ -44,6 +44,13 @@ class AutoMLConfig(BaseModel):
     feature_selection: bool = False
     feature_selection_trials: int | None = Field(default=None, ge=1)
     max_selected_features: int | None = Field(default=None, ge=1)
+    # Number of iterations (counting from iteration 1) in which the
+    # importance-based backward elimination (round1b) runs. 0 disables it
+    # entirely; 1 (default) runs it only in the first iteration; values > 1
+    # run it in the first N iterations. Features eliminated by round1b are
+    # permanently removed from the Round 2 candidate pool in every later
+    # iteration regardless of this setting.
+    round1b_iterations: int = Field(default=1, ge=0)
     seed: int = 42
     output_dir: Path = Path("automl_runs")
     overwrite: bool = False

@@ -49,10 +49,10 @@ def run_automl(config: AutoMLConfig | dict[str, Any]) -> AutoMLResult:
         logger.info("run_started", extra={"run_id": run_id})
         logger.info(
             "config: task=%s scorer=%s direction=%s n_trials=%d n_folds=%d iterations=%d "
-            "feature_selection=%s max_selected_features=%s seed=%d n_jobs=%d",
+            "feature_selection=%s max_selected_features=%s round1b_iterations=%d seed=%d n_jobs=%d",
             config.task, config.scorer, metric.direction, config.n_trials, config.n_folds,
             config.iterations, config.feature_selection, config.max_selected_features,
-            config.seed, config.n_jobs,
+            config.round1b_iterations, config.seed, config.n_jobs,
         )
         logger.info(
             "data: rows=%d predictors=%d (%s) monotonicity=%s",

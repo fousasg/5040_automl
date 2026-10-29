@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,12 @@ from .modeling import (
     suggest_parameters,
 )
 from .recording import TrialRecorder
+
+
+# Number of consecutive failed feature-removal attempts tolerated before the
+# importance-based backward elimination stops. A failure does not abort the
+# search; the next least-important feature is tried instead.
+ELIMINATION_FAILURE_PATIENCE = 3
 
 
 @dataclass(slots=True)
@@ -243,7 +250,185 @@ def refit_best(
     return model, oof, score
 
 
-def run_importance_based_feature_selection(
+def run_feature_selection(
+    data: PreparedData,
+    config: AutoMLConfig,
+    metric: MetricSpec,
+    best_parameters: dict[str, Any],
+    base_score: float,
+    all_features: list[str],
+    active_features: list[str],
+    iteration: int,
+    logger: logging.Logger,
+    shared_study: Any | None = None,
+    recorder: TrialRecorder | None = None,
+) -> tuple[list[str], float]:
+    import optuna
+
+    n_trials = config.feature_selection_trials or config.n_trials
+    max_selected = config.max_selected_features
+    feature_flag_keys = {
+        f"feat__{idx:03d}": name for idx, name in enumerate(all_features)
+    }
+
+    if shared_study is not None:
+        study = shared_study
+    else:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*experimental.*", category=FutureWarning)
+            warnings.filterwarnings("ignore", message=".*experimental.*", module="optuna")
+            sampler = optuna.samplers.TPESampler(
+                seed=config.seed + 1000 * iteration,
+                multivariate=True,
+            )
+        study = optuna.create_study(direction=metric.direction, sampler=sampler)
+
+    trials_before = len(study.trials)
+
+    active_set = set(active_features)
+    anchor_on = {
+        key: 1 if feat_name in active_set else 0
+        for key, feat_name in feature_flag_keys.items()
+    }
+    study.enqueue_trial(anchor_on)
+    logger.info(
+        "round2 anchored on %d/%d active features: %s",
+        len(active_set), len(all_features), ",".join(active_features),
+    )
+
+    anchor_trial_number = trials_before
+
+    def objective(trial: optuna.trial.Trial) -> float:
+        started = time.perf_counter()
+        is_anchor = trial.number == anchor_trial_number
+        selected = []
+        for flag_key, feat_name in feature_flag_keys.items():
+            if trial.suggest_int(flag_key, 0, 1) == 1:
+                selected.append(feat_name)
+
+        cap_violation = 0.0
+        if max_selected is not None:
+            cap_violation = max(0.0, float(len(selected) - max_selected))
+        trial.set_user_attr("cap_violation", cap_violation)
+        trial.set_user_attr("selected_features", selected)
+
+        if not selected:
+            if recorder is not None:
+                recorder.add(
+                    trial,
+                    round_name="round2",
+                    iteration=iteration,
+                    raw_score=None,
+                    penalized_score=worst_score(metric.direction),
+                    selected_features=selected,
+                )
+            logger.info(
+                "feature selection trial %d: empty subset, skipped (worst score)",
+                trial.number,
+            )
+            return worst_score(metric.direction)
+
+        if is_anchor:
+            raw_score = base_score
+        else:
+            try:
+                predictions = cross_validated_predictions(data, config, best_parameters, selected)
+                raw_score = score_predictions(
+                    metric,
+                    data.encoded_target.to_numpy(dtype=float),
+                    predictions,
+                )
+            except Exception as exc:
+                if recorder is not None:
+                    recorder.add(
+                        trial,
+                        round_name="round2",
+                        iteration=iteration,
+                        raw_score=None,
+                        penalized_score=worst_score(metric.direction),
+                        selected_features=selected,
+                    )
+                logger.warning(
+                    "feature selection trial %d failed (%d features): %s",
+                    trial.number, len(selected), exc,
+                )
+                return worst_score(metric.direction)
+
+        score = raw_score
+        if cap_violation > 0.0:
+            penalty_multiplier = int(cap_violation) + 1
+            if metric.direction == "minimize":
+                score = raw_score * penalty_multiplier
+            else:
+                score = raw_score / penalty_multiplier
+        if recorder is not None:
+            recorder.add(
+                trial,
+                round_name="round2",
+                iteration=iteration,
+                raw_score=raw_score,
+                penalized_score=score,
+                selected_features=selected,
+            )
+        logger.info(
+            "feature selection trial %d: %d/%d features raw=%.6f scored=%.6f "
+            "excess=%.0f duration=%.2fs selected=%s",
+            trial.number,
+            len(selected),
+            len(all_features),
+            raw_score,
+            score,
+            cap_violation,
+            time.perf_counter() - started,
+            ",".join(selected),
+        )
+        return score
+
+    study.optimize(objective, n_trials=n_trials, n_jobs=1)
+
+    if shared_study is not None:
+        logger.info(
+            "feature selection iteration %d: %d new trials, %d total in shared study",
+            iteration, len(study.trials) - trials_before, len(study.trials),
+        )
+
+    complete = [
+        t for t in study.trials[trials_before:]
+        if t.state == optuna.trial.TrialState.COMPLETE
+        and t.value is not None
+        and math.isfinite(t.value)
+    ]
+    logger.info(
+        "feature selection round2 iteration %d finished: %d/%d new scored trials",
+        iteration,
+        len(complete),
+        len(study.trials) - trials_before,
+    )
+
+    if not complete:
+        logger.info(
+            "feature-selection iteration %d: no scored trials, keeping %d active features",
+            iteration, len(active_features),
+        )
+        return list(active_features), base_score
+
+    best_trial = min(complete, key=lambda t: t.value) if metric.direction == "minimize" else max(complete, key=lambda t: t.value)
+    best_selected = best_trial.user_attrs.get("selected_features", active_features)
+    if not best_selected:
+        logger.info(
+            "feature selection iteration %d: winning subset empty, keeping %d active features",
+            iteration, len(active_features),
+        )
+        return list(active_features), base_score
+
+    logger.info(
+        "feature selection iteration %d winner: trial=%d score=%.6f features=%s",
+        iteration, best_trial.number, float(best_trial.value), ",".join(best_selected),
+    )
+    return list(best_selected), float(best_trial.value)
+
+
+def run_round1b_elimination(
     data: PreparedData,
     config: AutoMLConfig,
     metric: MetricSpec,
@@ -256,13 +441,19 @@ def run_importance_based_feature_selection(
 ) -> tuple[list[str], float]:
     """Backward feature elimination driven by XGBoost variable importance.
 
-    After Round 1, fit a model with the winning parameters on all active
-    predictors, rank them by fitted-model importance (most -> least), and
-    repeatedly drop the least-important one. Each candidate subset is scored
-    via the shared cross-validation folds. A drop is accepted when the score
-    is the same (within tolerance) or better than the current score; the first
-    drop that degrades the score stops the search, and the kept feature set is
-    the one that still includes that feature.
+    Runs as "round1b" for the first ``config.round1b_iterations`` iterations,
+    right after Round 1 and before the Optuna-based Round 2. Fits a model with
+    the winning parameters on all active predictors, ranks them by
+    fitted-model importance (most -> least), and tries dropping them in order
+    of increasing importance (least important first). Each candidate subset is
+    scored via the shared cross-validation folds. A drop is accepted when the
+    score is the same (within tolerance) or better than the current score.
+    A drop that degrades the score does NOT stop the search: that feature is
+    kept and the next least-important feature is tried instead. The search
+    stops only after ``ELIMINATION_FAILURE_PATIENCE`` consecutive failures, so
+    a later (more important) feature can still be dropped if doing so improves
+    the score. Every feature dropped here is permanently removed from the
+    candidate pool for all subsequent iterations.
     """
     import types
 
@@ -306,7 +497,12 @@ def run_importance_based_feature_selection(
         )
 
     step = 0
-    while len(current_features) > 1 and step < len(removal_order):
+    consecutive_failures = 0
+    while (
+        len(current_features) > 1
+        and step < len(removal_order)
+        and consecutive_failures < ELIMINATION_FAILURE_PATIENCE
+    ):
         removed = removal_order[step]
         candidate = [feature for feature in current_features if feature != removed]
         started = time.perf_counter()
@@ -319,31 +515,36 @@ def run_importance_based_feature_selection(
             )
         except Exception as exc:
             logger.warning(
-                "round2 elimination iteration %d step %d failed removing %s: %s",
+                "round1b elimination iteration %d step %d failed removing %s: %s",
                 iteration, step, removed, exc,
             )
             if recorder is not None:
                 recorder.add(
                     trial=types.SimpleNamespace(number=step),
-                    round_name="round2",
+                    round_name="round1b",
                     iteration=iteration,
                     raw_score=None,
                     penalized_score=worst_score(metric.direction),
                     selected_features=candidate,
                 )
-            break
+            # Treat a training failure like a degradation: keep the feature,
+            # count it toward the patience budget, and try the next candidate.
+            consecutive_failures += 1
+            step += 1
+            continue
 
         accepted = _same_or_better(score, current_score)
         logger.info(
-            "round2 elimination iteration %d step %d: removed=%s candidate=%d features "
-            "score=%.6f previous=%.6f accepted=%s duration=%.2fs",
+            "round1b elimination iteration %d step %d: removed=%s candidate=%d features "
+            "score=%.6f previous=%.6f accepted=%s consecutive_failures=%d duration=%.2fs",
             iteration, step, removed, len(candidate), score, current_score, accepted,
+            consecutive_failures + (0 if accepted else 1),
             time.perf_counter() - started,
         )
         if recorder is not None:
             recorder.add(
                 trial=types.SimpleNamespace(number=step),
-                round_name="round2",
+                round_name="round1b",
                 iteration=iteration,
                 raw_score=score,
                 penalized_score=score,
@@ -352,14 +553,19 @@ def run_importance_based_feature_selection(
         if accepted:
             current_features = candidate
             current_score = score
-            step += 1
+            consecutive_failures = 0
         else:
-            # Degrade: stop and keep the set that still includes `removed`.
-            break
+            # Degrade: keep `removed`, do not stop -- try the next least-important
+            # feature. Stop only after ELIMINATION_FAILURE_PATIENCE consecutive
+            # failures.
+            consecutive_failures += 1
+        step += 1
 
     logger.info(
-        "round2 elimination iteration %d finished: %d features score=%.6f selected=%s",
-        iteration, len(current_features), current_score, ",".join(current_features),
+        "round1b elimination iteration %d finished: %d features score=%.6f "
+        "steps_tried=%d consecutive_failures=%d selected=%s",
+        iteration, len(current_features), current_score, step, consecutive_failures,
+        ",".join(current_features),
     )
     return current_features, current_score
 
@@ -372,6 +578,8 @@ def run_iterative_optimization(
     run_id: str,
     logger: logging.Logger,
 ) -> OptimizationOutcome:
+    import optuna
+
     active_features: list[str] = list(config.predictors)
     best_params: dict[str, Any] | None = None
     best_score: float | None = None
@@ -379,13 +587,39 @@ def run_iterative_optimization(
     best_features: list[str] = list(config.predictors)
     last_study: Any = None
     prev_iter_best_params: dict[str, Any] | None = None
+    max_selected = config.max_selected_features
     recorder = TrialRecorder(config)
     trials_history: list[tuple[str, int, Any]] = []
 
+    # Features permanently removed by the round1b elimination (first iteration
+    # only). They are excluded from the Round 2 candidate pool in every
+    # subsequent iteration so they can never be re-selected.
+    eliminated_by_round1b: set[str] = set()
+
+    r2_shared_study: Any | None = None
     search_state: dict[str, dict[str, Any]] | None = None
     if config.iterations > 1:
         search_state = build_search_state()
         logger.info("built search state for round1 refinement (refine_factor=%.2f)", config.refine_factor)
+    if config.feature_selection and config.iterations > 1:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*experimental.*", category=FutureWarning)
+            warnings.filterwarnings("ignore", message=".*experimental.*", module="optuna")
+            r2_sampler = optuna.samplers.TPESampler(
+                seed=config.seed + 9999,
+                multivariate=True,
+            )
+        r2_shared_study = optuna.create_study(direction=metric.direction, sampler=r2_sampler)
+        logger.info("created shared round2 study for feature selection across iterations")
+
+    def _penalize(score: float, n_features: int) -> float:
+        if max_selected is None or n_features <= max_selected:
+            return score
+        excess = n_features - max_selected
+        multiplier = excess + 1
+        if metric.direction == "minimize":
+            return score * multiplier
+        return score / multiplier
 
     for iteration in range(1, config.iterations + 1):
         iteration_started = time.perf_counter()
@@ -408,38 +642,83 @@ def run_iterative_optimization(
         last_study = study
         round1_params = round1_outcome.best_parameters
         round1_raw_score = round1_outcome.best_score
+        round1_penalized = _penalize(round1_raw_score, len(active_features))
         logger.info(
-            "iteration %d round1 best raw_score: %.6f (%d features)",
-            iteration, round1_raw_score, len(active_features),
+            "iteration %d round1 best raw_score: %.6f penalized: %.6f (%d features)",
+            iteration, round1_raw_score, round1_penalized, len(active_features),
         )
 
         iter_params = round1_params
-        iter_score = round1_raw_score
+        iter_score = round1_penalized
         iter_features = list(active_features)
         iter_trial = round1_outcome.best_trial_number
 
-        if config.feature_selection:
+        # Round 1b: importance-based backward elimination. Runs in the first
+        # ``config.round1b_iterations`` iterations (0 disables it). Features
+        # dropped here are permanently removed from all future iterations.
+        if config.feature_selection and iteration <= config.round1b_iterations:
             logger.info(
-                "iteration %d/%d: round2 (importance-based feature elimination) from %d "
+                "iteration %d/%d: round1b (importance-based feature elimination) from %d "
                 "currently active features",
                 iteration, config.iterations, len(active_features),
             )
-            r2_features, r2_score = run_importance_based_feature_selection(
+            r1b_features, r1b_score = run_round1b_elimination(
                 data, config, metric, round1_params, round1_raw_score,
                 active_features=active_features,
                 iteration=iteration,
                 logger=logger,
                 recorder=recorder,
             )
+            newly_eliminated = set(active_features) - set(r1b_features)
+            if newly_eliminated:
+                eliminated_by_round1b |= newly_eliminated
+                logger.info(
+                    "iteration %d round1b permanently eliminated %d features: %s",
+                    iteration, len(newly_eliminated), ",".join(sorted(newly_eliminated)),
+                )
+            # The survivors become the active set for round2 and all future rounds.
+            active_features = list(r1b_features)
+            iter_features = list(r1b_features)
+            iter_score = _penalize(r1b_score, len(r1b_features))
+            # Round 2 anchors on the post-elimination baseline.
+            round1_raw_score = r1b_score
+            logger.info(
+                "iteration %d round1b finished: %d features score=%.6f selected=%s",
+                iteration, len(r1b_features), r1b_score, ",".join(r1b_features),
+            )
+
+        if config.feature_selection:
+            # Round 2 candidate pool: all original predictors except those
+            # permanently eliminated by round1b, so they can never be re-selected.
+            round2_candidates = [
+                feature for feature in config.predictors
+                if feature not in eliminated_by_round1b
+            ]
+            logger.info(
+                "iteration %d/%d: round2 (feature selection) from %d candidates, "
+                "%d currently active",
+                iteration, config.iterations, len(round2_candidates),
+                len(active_features),
+            )
+            r2_features, r2_score = run_feature_selection(
+                data, config, metric, round1_params, round1_raw_score,
+                all_features=round2_candidates,
+                active_features=active_features,
+                iteration=iteration,
+                logger=logger,
+                shared_study=r2_shared_study,
+                recorder=recorder,
+            )
             logger.info(
                 "iteration %d round2 best score: %.6f with %d features: %s",
                 iteration, r2_score, len(r2_features), ",".join(r2_features),
             )
-            # Elimination guarantees r2_score is same-or-better vs round1_raw_score,
-            # so the eliminated subset becomes the iteration result.
-            iter_features = r2_features
-            iter_score = r2_score
-            logger.info("iteration %d: round2 elimination result adopted", iteration)
+            if is_better(r2_score, iter_score, metric.direction):
+                iter_features = r2_features
+                iter_score = r2_score
+                logger.info("iteration %d: round2 wins", iteration)
+            else:
+                logger.info("iteration %d: round1/round1b wins", iteration)
 
         active_features = list(iter_features)
         prev_iter_best_params = dict(iter_params)
@@ -470,6 +749,9 @@ def run_iterative_optimization(
         "iterative optimization finished: best_score=%.6f best_trial=%d features=%s params=%s",
         best_score, best_trial_number, ",".join(best_features), _format_params(best_params),
     )
+
+    if config.feature_selection and r2_shared_study is not None:
+        trials_history.append(("round2", 0, r2_shared_study))
 
     return OptimizationOutcome(
         study=last_study,
