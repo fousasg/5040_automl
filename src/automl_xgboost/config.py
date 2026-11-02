@@ -51,6 +51,18 @@ class AutoMLConfig(BaseModel):
     # permanently removed from the Round 2 candidate pool in every later
     # iteration regardless of this setting.
     round1b_iterations: int = Field(default=1, ge=0)
+    # Bottom-up variable reduction: after Round 1 (or Round 1b if enabled) of
+    # iteration 1, fit the best model, rank predictors by XGBoost variable
+    # importance, drop those below ``bottom_up_importance_threshold``, rebuild via
+    # cross-validation on the survivors, and treat that model as the best from
+    # this point onward. The survivor set also seeds the Round 2 Optuna study.
+    bottom_up_variable_reduction: bool = False
+    # Number of Optuna trials for Round 1 of iteration 1 when bottom-up variable
+    # reduction is active. When None (default), falls back to ``n_trials``.
+    bottom_up_n_trials: int | None = Field(default=None, ge=1)
+    # XGBoost variable-importance threshold below which predictors are dropped
+    # by the bottom-up reduction (importances are normalized to sum to 1).
+    bottom_up_importance_threshold: float = Field(default=0.01, ge=0.0, le=1.0)
     seed: int = 42
     output_dir: Path = Path("automl_runs")
     overwrite: bool = False

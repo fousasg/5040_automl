@@ -119,6 +119,7 @@ def optimize(
     recorder: TrialRecorder | None = None,
     round_name: str = "round1",
     iteration: int = 1,
+    n_trials: int | None = None,
 ) -> OptimizationOutcome:
     import optuna
 
@@ -189,13 +190,14 @@ def optimize(
             logger.exception("trial_failed", extra={"run_id": run_id, "trial_number": trial.number})
             raise TrialTrainingError(str(exc)) from exc
 
+    trial_count = n_trials if n_trials is not None else config.n_trials
     logger.info(
         "study started: n_trials=%d timeout=%s n_features=%d",
-        config.n_trials, config.timeout_seconds or "none", n_features,
+        trial_count, config.timeout_seconds or "none", n_features,
     )
     study.optimize(
         objective,
-        n_trials=config.n_trials,
+        n_trials=trial_count,
         timeout=config.timeout_seconds,
         n_jobs=1,
         catch=(TrialTrainingError,),
@@ -570,6 +572,64 @@ def run_round1b_elimination(
     return current_features, current_score
 
 
+def run_bottom_up_reduction(
+    data: PreparedData,
+    config: AutoMLConfig,
+    metric: MetricSpec,
+    best_parameters: dict[str, Any],
+    active_features: list[str],
+    base_score: float,
+    logger: logging.Logger,
+) -> tuple[list[str], float]:
+    """Bottom-up variable reduction via an XGBoost importance threshold.
+
+    Fits a model with the winning parameters on the active predictors, reads
+    ``feature_importances_`` (normalized to sum to 1), drops every predictor
+    whose importance is below ``config.bottom_up_importance_threshold``, then
+    rebuilds via the shared cross-validation folds on the survivors and
+    returns the survivors together with their CV score. If every predictor
+    falls below the threshold the reduction is a no-op (all features kept).
+    """
+    ranking_model = create_model(config, best_parameters, active_features)
+    ranking_model.fit(
+        data.features[active_features], data.encoded_target, verbose=False
+    )
+    importances = np.asarray(
+        getattr(ranking_model, "feature_importances_", []), dtype=float
+    )
+    if importances.shape != (len(active_features),) or not np.isfinite(importances).all():
+        raise TrainingError("XGBoost returned invalid feature importances for bottom-up reduction")
+
+    importance_by_feature = dict(zip(active_features, importances))
+    threshold = config.bottom_up_importance_threshold
+    survivors = [feature for feature in active_features if importance_by_feature[feature] >= threshold]
+    dropped = [feature for feature in active_features if importance_by_feature[feature] < threshold]
+    if not survivors:
+        logger.warning(
+            "bottom-up reduction: all %d features below threshold %.6f; keeping all features",
+            len(active_features), threshold,
+        )
+        return list(active_features), float(base_score)
+    if not dropped:
+        logger.info(
+            "bottom-up reduction: no feature below threshold %.6f; keeping all %d features",
+            threshold, len(active_features),
+        )
+        return list(active_features), float(base_score)
+
+    predictions = cross_validated_predictions(data, config, best_parameters, survivors)
+    score = score_predictions(metric, data.encoded_target.to_numpy(dtype=float), predictions)
+    logger.info(
+        "bottom-up reduction: dropped %d/%d features below threshold %.6f: %s",
+        len(dropped), len(active_features), threshold, ",".join(dropped),
+    )
+    logger.info(
+        "bottom-up reduction: %d survivors score=%.6f selected=%s",
+        len(survivors), score, ",".join(survivors),
+    )
+    return survivors, score
+
+
 def run_iterative_optimization(
     data: PreparedData,
     config: AutoMLConfig,
@@ -629,6 +689,15 @@ def run_iterative_optimization(
         )
 
         study, _ = create_study(config, metric, run_dir, f"{run_id}_iter{iteration}")
+        # Bottom-up variable reduction uses a larger Round 1 trial budget in
+        # iteration 1 so a stronger importance ranking feeds the reduction.
+        round1_n_trials = None
+        if (
+            config.bottom_up_variable_reduction
+            and iteration == 1
+            and config.bottom_up_n_trials is not None
+        ):
+            round1_n_trials = config.bottom_up_n_trials
         round1_outcome = optimize(
             study, data, config, metric, run_id, logger,
             selected_features=active_features,
@@ -637,6 +706,7 @@ def run_iterative_optimization(
             recorder=recorder,
             round_name="round1",
             iteration=iteration,
+            n_trials=round1_n_trials,
         )
         trials_history.append(("round1", iteration, study))
         last_study = study
@@ -687,9 +757,60 @@ def run_iterative_optimization(
                 iteration, len(r1b_features), r1b_score, ",".join(r1b_features),
             )
 
+        # Bottom-up variable reduction (iteration 1 only). After Round 1 (or
+        # Round 1b if it ran), fit the best model, drop predictors whose
+        # importance is below ``bottom_up_importance_threshold``, rebuild via CV
+        # on the survivors, and use that survivor model as the starting point
+        # (anchor) for Round 2. The dropped predictors are NOT permanently
+        # removed: they remain available in Round 2's candidate pool, but the
+        # Round 2 anchor trial starts with only the survivors selected.
+        if config.bottom_up_variable_reduction and iteration == 1:
+            logger.info(
+                "iteration %d/%d: bottom-up variable reduction from %d active features "
+                "(importance threshold=%.6f)",
+                iteration, config.iterations, len(active_features),
+                config.bottom_up_importance_threshold,
+            )
+            bu_features, bu_score = run_bottom_up_reduction(
+                data, config, metric, round1_params,
+                active_features=active_features,
+                base_score=round1_raw_score,
+                logger=logger,
+            )
+            dropped = set(active_features) - set(bu_features)
+            if dropped:
+                logger.info(
+                    "iteration %d bottom-up dropped %d features (kept available for "
+                    "round2): %s",
+                    iteration, len(dropped), ",".join(sorted(dropped)),
+                )
+            # The survivors become the active set / Round 2 anchor. Round 2's
+            # candidate pool still includes the dropped predictors, so they can be
+            # re-selected if doing so improves the score.
+            active_features = list(bu_features)
+            iter_features = list(bu_features)
+            iter_score = _penalize(bu_score, len(bu_features))
+            iter_trial = round1_outcome.best_trial_number
+            round1_raw_score = bu_score
+            logger.info(
+                "iteration %d bottom-up reduction finished: %d features score=%.6f "
+                "selected=%s",
+                iteration, len(bu_features), bu_score, ",".join(bu_features),
+            )
+            # The bottom-up model becomes the global best / Round 2 starting point.
+            best_params = round1_params
+            best_score = iter_score
+            best_trial_number = iter_trial
+            best_features = list(bu_features)
+            logger.info(
+                "iteration %d: bottom-up model adopted as global best score=%.6f",
+                iteration, best_score,
+            )
+
         if config.feature_selection:
             # Round 2 candidate pool: all original predictors except those
-            # permanently eliminated by round1b, so they can never be re-selected.
+            # permanently eliminated by round 1b (bottom-up dropped features
+            # are NOT in this set, so they remain selectable in Round 2).
             round2_candidates = [
                 feature for feature in config.predictors
                 if feature not in eliminated_by_round1b

@@ -43,6 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--feature-selection-trials", type=int)
     run.add_argument("--max-selected-features", type=int)
     run.add_argument("--round1b-iterations", type=int)
+    run.add_argument("--bottom-up-variable-reduction", action=argparse.BooleanOptionalAction, default=None)
+    run.add_argument("--bottom-up-n-trials", type=int)
+    run.add_argument("--bottom-up-importance-threshold", type=float)
     run.add_argument("--seed", type=int)
     run.add_argument("--output-dir", type=Path)
     run.add_argument("--output-format", choices=("parquet", "csv"))
@@ -65,7 +68,9 @@ def resolve_cli_config(namespace: argparse.Namespace) -> AutoMLConfig:
         "dataset", "target", "task", "scorer", "predictors", "fold_column", "algorithms",
         "positive_class", "n_folds", "n_trials", "timeout_seconds", "iterations",
         "refine_factor", "feature_selection", "feature_selection_trials",
-        "max_selected_features", "round1b_iterations", "seed", "output_dir",
+        "max_selected_features", "round1b_iterations",
+        "bottom_up_variable_reduction", "bottom_up_n_trials",
+        "bottom_up_importance_threshold", "seed", "output_dir",
         "output_format", "explain_sample_size", "n_jobs", "device", "overwrite",
     ):
         value = getattr(namespace, key, None)

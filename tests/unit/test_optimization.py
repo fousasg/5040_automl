@@ -7,7 +7,7 @@ optuna = pytest.importorskip("optuna")
 from automl_xgboost.config import AutoMLConfig
 from automl_xgboost.data import prepare_data
 from automl_xgboost.metrics import get_metric
-from automl_xgboost.optimization import run_round1b_elimination
+from automl_xgboost.optimization import run_round1b_elimination, run_bottom_up_reduction
 
 
 def _ranking_model_factory(importances):
@@ -244,4 +244,107 @@ def test_importance_based_elimination_stops_after_three_consecutive_failures(mon
     # Three consecutive failures (d, c, b) stop the search before trying a;
     # all four features are kept, baseline unchanged.
     assert selected == ["a", "b", "c", "d"]
+    assert score == 2.0
+
+
+def test_bottom_up_reduction_drops_low_importance_features(monkeypatch):
+    # Features a, b above the threshold; c below. The reduction must drop c
+    # and rebuild via CV on [a, b] (fake_cv returns the target -> rmse 0).
+    source = pd.DataFrame(
+        {
+            "a": [0, 1, 2, 3, 4, 5],
+            "b": [5, 4, 3, 2, 1, 0],
+            "c": [1, 0, 5, 4, 3, 2],
+            "target": [0, 1, 2, 3, 4, 5],
+        }
+    )
+    config = AutoMLConfig(
+        dataset=source,
+        target="target",
+        task="regression",
+        scorer="rmse",
+        predictors=["a", "b", "c"],
+        n_folds=2,
+        n_trials=1,
+        bottom_up_variable_reduction=True,
+        bottom_up_importance_threshold=0.3,
+    )
+    data = prepare_data(source, config)
+    metric = get_metric("regression", "rmse")
+
+    fake_model = _ranking_model_factory(
+        importances=__import__("numpy").array([0.5, 0.4, 0.02])
+    )
+    monkeypatch.setattr(
+        "automl_xgboost.optimization.create_model", lambda *a, **k: fake_model
+    )
+
+    def fake_cv(data, config, parameters, selected_features=None):
+        assert selected_features == ["a", "b"], selected_features
+        return data.encoded_target.to_numpy(dtype=float)
+
+    monkeypatch.setattr("automl_xgboost.optimization.cross_validated_predictions", fake_cv)
+
+    selected, score = run_bottom_up_reduction(
+        data,
+        config,
+        metric,
+        best_parameters={},
+        active_features=["a", "b", "c"],
+        base_score=2.0,
+        logger=logging.getLogger("test_bottom_up_drop"),
+    )
+
+    # c (importance 0.02 < 0.3) is dropped; survivors returned in original order.
+    assert selected == ["a", "b"]
+    assert score == 0.0  # fake_cv returns target -> rmse 0
+
+
+def test_bottom_up_reduction_keeps_all_when_all_below_threshold(monkeypatch):
+    # Every feature below the threshold -> reduction is a no-op (keep all, baseline).
+    source = pd.DataFrame(
+        {
+            "a": [0, 1, 2, 3, 4, 5],
+            "b": [5, 4, 3, 2, 1, 0],
+            "target": [0, 1, 2, 3, 4, 5],
+        }
+    )
+    config = AutoMLConfig(
+        dataset=source,
+        target="target",
+        task="regression",
+        scorer="rmse",
+        predictors=["a", "b"],
+        n_folds=2,
+        n_trials=1,
+        bottom_up_variable_reduction=True,
+        bottom_up_importance_threshold=0.9,
+    )
+    data = prepare_data(source, config)
+    metric = get_metric("regression", "rmse")
+
+    fake_model = _ranking_model_factory(
+        importances=__import__("numpy").array([0.4, 0.3])
+    )
+    monkeypatch.setattr(
+        "automl_xgboost.optimization.create_model", lambda *a, **k: fake_model
+    )
+
+    def fake_cv(data, config, parameters, selected_features=None):
+        raise AssertionError("CV should not run when no feature is dropped")
+
+    monkeypatch.setattr("automl_xgboost.optimization.cross_validated_predictions", fake_cv)
+
+    selected, score = run_bottom_up_reduction(
+        data,
+        config,
+        metric,
+        best_parameters={},
+        active_features=["a", "b"],
+        base_score=2.0,
+        logger=logging.getLogger("test_bottom_up_keep"),
+    )
+
+    # Both below 0.9 -> keep all, baseline unchanged.
+    assert selected == ["a", "b"]
     assert score == 2.0
