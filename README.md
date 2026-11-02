@@ -8,7 +8,7 @@ This is the H2O-free implementation. It uses only XGBoost for modeling, Optuna f
 - One shared deterministic fold assignment for every Optuna trial
 - Best model selected from combined out-of-fold predictions
 - Optional caller-provided folds and numeric monotonicity constraints
-- **Iterative optimization with automatic variable selection**: each iteration runs two sub-rounds — one for hyper-parameters (Round 1) and one for feature selection (Round 2) — and carries the winning configuration forward
+- **Iterative optimization with automatic variable selection**: each iteration can run up to three sub-rounds — Round 1 (hyper-parameters), an optional Round 1b importance-based backward elimination, and Round 2 (Optuna feature selection) — and carries the winning configuration forward. An optional **bottom-up variable reduction** step (iteration 1 only) drops low-importance predictors and seeds Round 2 from the survivor model.
 - Native XGBoost missing-value routing: predictor nulls are not imputed and rows are not dropped
 - Native categorical features with stable pandas category domains
 - Out-of-fold predictions, full-data in-sample predictions, full-row SHAP values, optimization graphs, JSON model, metadata, and checksummed manifest
@@ -78,16 +78,21 @@ print(result.artifacts.manifest)
 
 By default the pipeline runs a single Optuna study that tunes XGBoost hyper-parameters using all provided predictors. Enabling feature selection adds a second optimization dimension: the pipeline alternates between tuning hyper-parameters and selecting which predictors to keep.
 
-Each iteration consists of two sub-rounds:
+Each iteration can consist of up to three sub-rounds:
 
 1. **Round 1 (hyper-parameters)** — Optuna TPE searches over XGBoost hyper-parameters while holding the active feature set fixed. When `iterations > 1`, the search space is progressively narrowed around the best values using `refine_factor` (the Cyprus-Uni search-space refinement approach).
-2. **Round 2 (feature selection)** — Fixes hyper-parameters to Round 1's best and uses Optuna binary flags (one per predictor) to search over feature subsets. The first trial is an anchor that preserves the Round 1 result as a baseline, so feature selection can never regress below the hyper-parameter-only result.
+2. **Round 1b (importance-based backward elimination)** — Optional, runs only in the first `round1b_iterations` iterations. Fixes hyper-parameters to Round 1's best, fits a model, ranks predictors by XGBoost variable importance, and repeatedly drops the least-important survivor. A drop that degrades the CV score does not stop the search; the next least-important predictor is tried instead, and the search stops only after 3 consecutive failures. Every predictor dropped by Round1b is **permanently removed** from the Round 2 candidate pool in all later iterations.
+3. **Round 2 (feature selection)** — Fixes hyper-parameters to Round 1's best and uses Optuna binary flags (one per predictor) to search over feature subsets. The first trial is an anchor that preserves the Round 1/Round1b result as a baseline, so feature selection can never regress below the hyper-parameter-only result. The candidate pool is all original predictors except those permanently eliminated by Round1b.
 
-After both rounds, the iteration picks whichever round produced the better CV score and carries that feature set and parameters forward to the next iteration.
+After the rounds, the iteration picks whichever round produced the better CV score and carries that feature set and parameters forward to the next iteration.
+
+### Bottom-up variable reduction (iteration 1 only)
+
+When `bottom_up_variable_reduction` is enabled, an extra reduction step runs in **iteration 1 only**, after Round 1 (or Round 1b if it ran). It fits the best model, ranks predictors by XGBoost variable importance, drops every predictor whose importance is below `bottom_up_importance_threshold`, and rebuilds a model via cross-validation on the survivors. That survivor model becomes the **starting point (anchor) of Round 2**: Round 2's anchor trial starts with only the survivors selected and the dropped predictors unselected, but the dropped predictors **remain available** in Round 2's candidate pool, so Round 2 can re-select them if doing so improves the score. Round 1 of iteration 1 uses `bottom_up_n_trials` trials (falls back to `n_trials` when unset) so a stronger importance ranking feeds the reduction.
 
 ### Configuration
 
-Five fields control the behavior:
+Eight fields control the behavior:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -97,6 +102,9 @@ Five fields control the behavior:
 | `feature_selection_trials` | int | `n_trials` | Optuna trials for the feature-selection round (defaults to `n_trials` when omitted) |
 | `max_selected_features` | int | none | Optional cap on how many features Round 2 can select |
 | `round1b_iterations` | int | `1` | Number of iterations (from iteration 1) in which the importance-based backward elimination (round1b) runs. `0` disables it; `1` runs it only in the first iteration; values > 1 run it in the first N iterations. Features eliminated by round1b are permanently removed from the Round 2 candidate pool in every later iteration. |
+| `bottom_up_variable_reduction` | bool | `false` | Enable the bottom-up importance-threshold reduction in iteration 1 |
+| `bottom_up_n_trials` | int | none | Optuna trials for Round 1 of iteration 1 when bottom-up reduction is active (falls back to `n_trials` when unset) |
+| `bottom_up_importance_threshold` | float | `0.01` | XGBoost variable-importance threshold below which predictors are dropped by the bottom-up reduction (importances are normalized to sum to 1; `0.01` = 1% of total importance) |
 
 With the defaults (`iterations: 1`, `feature_selection: false`), behavior is identical to the original single-pass pipeline.
 
@@ -115,6 +123,10 @@ iterations: 3
 feature_selection: true
 feature_selection_trials: 30
 max_selected_features: 5
+round1b_iterations: 1          # run round1b only in iteration 1
+bottom_up_variable_reduction: true   # importance-threshold reduction in iteration 1
+bottom_up_n_trials: 60           # more Round1 trials in iteration 1
+bottom_up_importance_threshold: 0.01
 output_dir: runs/with_feature_selection
 ```
 
@@ -136,6 +148,10 @@ result = run_automl(AutoMLConfig(
     feature_selection=True,
     feature_selection_trials=20,
     max_selected_features=3,
+    round1b_iterations=1,
+    bottom_up_variable_reduction=True,
+    bottom_up_n_trials=40,
+    bottom_up_importance_threshold=0.01,
     output_dir="runs/feature_selection_example",
 ))
 
