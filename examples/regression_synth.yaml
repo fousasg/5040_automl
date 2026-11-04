@@ -20,7 +20,7 @@ monotonicity_constraints:
   s_int1: 1
 
 # Feature selection / iterative optimization (optional):
-iterations: 3
+iterations: 5
 refine_factor: 0.99        # narrow round1 search space by 10% each iteration
 feature_selection: true
 feature_selection_trials: 15
