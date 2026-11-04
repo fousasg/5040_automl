@@ -773,11 +773,20 @@ def run_iterative_optimization(
         # removed: they remain available in Round 2's candidate pool, but the
         # Round 2 anchor trial starts with only the survivors selected.
         if config.bottom_up_variable_reduction and iteration == 1:
+            # Match the dynamic default used inside run_bottom_up_reduction so
+            # the log line always has a real number to format (config value may
+            # be None, which would crash the %.6f format specifier).
+            if config.bottom_up_importance_threshold is not None:
+                effective_threshold = float(config.bottom_up_importance_threshold)
+            else:
+                effective_threshold = (
+                    (1.0 / len(active_features)) / 2.0 if active_features else 0.0
+                )
             logger.info(
                 "iteration %d/%d: bottom-up variable reduction from %d active features "
                 "(importance threshold=%.6f)",
                 iteration, config.iterations, len(active_features),
-                config.bottom_up_importance_threshold,
+                effective_threshold,
             )
             bu_features, bu_score = run_bottom_up_reduction(
                 data, config, metric, round1_params,
