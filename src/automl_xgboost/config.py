@@ -62,7 +62,11 @@ class AutoMLConfig(BaseModel):
     bottom_up_n_trials: int | None = Field(default=None, ge=1)
     # XGBoost variable-importance threshold below which predictors are dropped
     # by the bottom-up reduction (importances are normalized to sum to 1).
-    bottom_up_importance_threshold: float = Field(default=0.01, ge=0.0, le=1.0)
+    # When None (default), the threshold is computed dynamically from
+    # the number of predictors the bottom-up model is built on as
+    # ``(1 / n_predictors) / 2`` (half the average importance); set an
+    # explicit float to use a fixed threshold instead.
+    bottom_up_importance_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
     seed: int = 42
     output_dir: Path = Path("automl_runs")
     overwrite: bool = False

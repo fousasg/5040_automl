@@ -47,14 +47,18 @@ def run_automl(config: AutoMLConfig | dict[str, Any]) -> AutoMLResult:
     run_started_perf = time.perf_counter()
     try:
         logger.info("run_started", extra={"run_id": run_id})
+        bottom_up_threshold_log = (
+            "dynamic (1/n)/2" if config.bottom_up_importance_threshold is None
+            else f"{config.bottom_up_importance_threshold:.6f}"
+        )
         logger.info(
             "config: task=%s scorer=%s direction=%s n_trials=%d n_folds=%d iterations=%d "
             "feature_selection=%s max_selected_features=%s round1b_iterations=%d "
-            "bottom_up_variable_reduction=%s bottom_up_importance_threshold=%.6f seed=%d n_jobs=%d",
+            "bottom_up_variable_reduction=%s bottom_up_importance_threshold=%s seed=%d n_jobs=%d",
             config.task, config.scorer, metric.direction, config.n_trials, config.n_folds,
             config.iterations, config.feature_selection, config.max_selected_features,
             config.round1b_iterations, config.bottom_up_variable_reduction,
-            config.bottom_up_importance_threshold, config.seed, config.n_jobs,
+            bottom_up_threshold_log, config.seed, config.n_jobs,
         )
         logger.info(
             "data: rows=%d predictors=%d (%s) monotonicity=%s",

@@ -585,10 +585,14 @@ def run_bottom_up_reduction(
 
     Fits a model with the winning parameters on the active predictors, reads
     ``feature_importances_`` (normalized to sum to 1), drops every predictor
-    whose importance is below ``config.bottom_up_importance_threshold``, then
-    rebuilds via the shared cross-validation folds on the survivors and
-    returns the survivors together with their CV score. If every predictor
-    falls below the threshold the reduction is a no-op (all features kept).
+    whose importance is below the effective threshold, then rebuilds via the
+    shared cross-validation folds on the survivors and returns the survivors
+    together with their CV score. The effective threshold is
+    ``config.bottom_up_importance_threshold`` when an explicit value is set;
+    otherwise it is computed dynamically from the number of active predictors
+    as ``(1 / n_predictors) / 2`` (half the average importance). If every
+    predictor falls below the threshold the reduction is a no-op (all features
+    kept).
     """
     ranking_model = create_model(config, best_parameters, active_features)
     ranking_model.fit(
@@ -601,7 +605,11 @@ def run_bottom_up_reduction(
         raise TrainingError("XGBoost returned invalid feature importances for bottom-up reduction")
 
     importance_by_feature = dict(zip(active_features, importances))
-    threshold = config.bottom_up_importance_threshold
+    # Dynamic default: half the average importance when no explicit threshold set.
+    if config.bottom_up_importance_threshold is not None:
+        threshold = float(config.bottom_up_importance_threshold)
+    else:
+        threshold = (1.0 / len(active_features)) / 2.0 if active_features else 0.0
     survivors = [feature for feature in active_features if importance_by_feature[feature] >= threshold]
     dropped = [feature for feature in active_features if importance_by_feature[feature] < threshold]
     if not survivors:

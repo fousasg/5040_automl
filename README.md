@@ -104,7 +104,7 @@ Eight fields control the behavior:
 | `round1b_iterations` | int | `1` | Number of iterations (from iteration 1) in which the importance-based backward elimination (round1b) runs. `0` disables it; `1` runs it only in the first iteration; values > 1 run it in the first N iterations. Features eliminated by round1b are permanently removed from the Round 2 candidate pool in every later iteration. |
 | `bottom_up_variable_reduction` | bool | `false` | Enable the bottom-up importance-threshold reduction in iteration 1 |
 | `bottom_up_n_trials` | int | none | Optuna trials for Round 1 of iteration 1 when bottom-up reduction is active (falls back to `n_trials` when unset) |
-| `bottom_up_importance_threshold` | float | `0.01` | XGBoost variable-importance threshold below which predictors are dropped by the bottom-up reduction (importances are normalized to sum to 1; `0.01` = 1% of total importance) |
+| `bottom_up_importance_threshold` | float | none | XGBoost variable-importance threshold below which predictors are dropped by the bottom-up reduction (importances normalized to sum to 1). When unset, the threshold is computed dynamically from the number of predictors as `(1 / n_predictors) / 2` (half the average importance); set an explicit float to use a fixed threshold instead. |
 
 With the defaults (`iterations: 1`, `feature_selection: false`), behavior is identical to the original single-pass pipeline.
 

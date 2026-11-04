@@ -38,5 +38,5 @@ round1b_iterations: 1
 # available in round2's candidate pool.
 bottom_up_variable_reduction: false
 bottom_up_n_trials: 20         # round1 trials in iteration 1 (default: n_trials)
-bottom_up_importance_threshold: 0.01   # drop importance < 1% (normalized)
+# bottom_up_importance_threshold: 0.01   # fixed threshold; unset -> dynamic (1/n_predictors)/2
 
