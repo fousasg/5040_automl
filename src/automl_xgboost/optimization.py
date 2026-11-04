@@ -665,6 +665,13 @@ def run_iterative_optimization(
     eliminated_by_round1b: set[str] = set()
 
     r2_shared_study: Any | None = None
+    # Round 1 study carried across iterations. When the previous
+    # iteration's Round 2 did NOT improve the score, the next iteration
+    # continues this study (preserving TPE sampler state and trial
+    # history) instead of starting a fresh one. When Round 2 improved
+    # (or on iteration 1), a new Round 1 study is created.
+    round1_study: Any | None = None
+    prev_round2_won = False
     search_state: dict[str, dict[str, Any]] | None = None
     if config.iterations > 1:
         search_state = build_search_state()
@@ -696,7 +703,24 @@ def run_iterative_optimization(
             iteration, config.iterations, len(active_features), ",".join(active_features),
         )
 
-        study, _ = create_study(config, metric, run_dir, f"{run_id}_iter{iteration}")
+        # Round 1 study: continue the previous iteration's study when
+        # Round 2 did not improve the score last iteration; start a
+        # fresh study when Round 2 improved (or on iteration 1).
+        if round1_study is not None and not prev_round2_won:
+            study = round1_study
+            logger.info(
+                "iteration %d/%d: round1 continues previous iteration's optuna study",
+                iteration, config.iterations,
+            )
+            new_round1_study = False
+        else:
+            study, _ = create_study(config, metric, run_dir, f"{run_id}_iter{iteration}")
+            round1_study = study
+            logger.info(
+                "iteration %d/%d: round1 started a new optuna study",
+                iteration, config.iterations,
+            )
+            new_round1_study = True
         # Bottom-up variable reduction uses a larger Round 1 trial budget in
         # iteration 1 so a stronger importance ranking feeds the reduction.
         round1_n_trials = None
@@ -716,7 +740,11 @@ def run_iterative_optimization(
             iteration=iteration,
             n_trials=round1_n_trials,
         )
-        trials_history.append(("round1", iteration, study))
+        # Only record a study in the fallback history once (when it is
+        # first created); a continued study is already in the history and
+        # its trials accumulate in the same object.
+        if new_round1_study:
+            trials_history.append(("round1", iteration, study))
         last_study = study
         round1_params = round1_outcome.best_parameters
         round1_raw_score = round1_outcome.best_score
@@ -824,6 +852,11 @@ def run_iterative_optimization(
                 iteration, best_score,
             )
 
+        # When feature selection is disabled, Round 2 never runs, so it can
+        # never improve the score: carry the Round 1 study forward.
+        if not config.feature_selection:
+            prev_round2_won = False
+
         if config.feature_selection:
             # Round 2 candidate pool: all original predictors except those
             # permanently eliminated by round 1b (bottom-up dropped features
@@ -855,8 +888,10 @@ def run_iterative_optimization(
                 iter_features = r2_features
                 iter_score = r2_score
                 logger.info("iteration %d: round2 wins", iteration)
+                prev_round2_won = True
             else:
                 logger.info("iteration %d: round1/round1b wins", iteration)
+                prev_round2_won = False
 
         active_features = list(iter_features)
         prev_iter_best_params = dict(iter_params)
