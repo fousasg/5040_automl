@@ -41,7 +41,7 @@ def run_automl(config: AutoMLConfig | dict[str, Any]) -> AutoMLResult:
     data = prepare_data(load_dataset(config.dataset), config)
     run_id = _run_id()
     run_dir = prepare_run_directory(config, run_id)
-    logger, log_path = configure_logging(run_dir, run_id)
+    logger, log_path = configure_logging(run_dir, run_id, verbose=config.verbose)
     logger_closed = False
     started_at = utc_now()
     run_started_perf = time.perf_counter()

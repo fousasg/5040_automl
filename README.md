@@ -42,6 +42,22 @@ automl-xgboost run --config examples/classification.yaml
 
 Results are written under `runs/`. The bundled example configs keep trial counts low enough for smoke tests; increase `n_trials` and `feature_selection_trials` for real model selection.
 
+### Verbose / console logging
+
+By default the pipeline writes structured progress INFO messages only to `run.log`, so the terminal shows Optuna's own per-trial output and the final JSON status line. Set `verbose: true` (or pass `--verbose`) to mirror the same INFO messages — `run_started`, config/data summary, iteration/round progress, feature-selection trials, bottom-up reduction, refinement bounds, optimization/refit/SHAP/run-completed summaries — to stderr while the run is in progress.
+
+```bash
+automl-xgboost run --config examples/regression.yaml --verbose
+```
+
+```yaml
+verbose: true
+```
+
+```python
+result = run_automl(AutoMLConfig(..., verbose=True))
+```
+
 Reactivate or remove the environment later:
 
 ```bash

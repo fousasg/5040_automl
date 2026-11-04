@@ -67,6 +67,14 @@ class AutoMLConfig(BaseModel):
     # ``(1 / n_predictors) / 2`` (half the average importance); set an
     # explicit float to use a fixed threshold instead.
     bottom_up_importance_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Mirror the run.log INFO messages to the console (stderr) while the run
+    # is in progress. When False (default), the application logger only
+    # writes to run.log and the terminal shows Optuna's own per-trial output;
+    # when True, the same structured INFO lines (run_started, config/data
+    # summary, iteration/round progress, feature-selection trials, bottom-up
+    # reduction, refinement bounds, optimization/refit/shap/run_completed) are
+    # also printed to stderr.
+    verbose: bool = False
     seed: int = 42
     output_dir: Path = Path("automl_runs")
     overwrite: bool = False

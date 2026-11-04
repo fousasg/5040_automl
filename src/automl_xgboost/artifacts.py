@@ -56,20 +56,36 @@ def prepare_run_directory(config: AutoMLConfig, run_id: str) -> Path:
     return child
 
 
-def configure_logging(run_dir: Path, run_id: str) -> tuple[logging.Logger, Path]:
+def configure_logging(
+    run_dir: Path,
+    run_id: str,
+    *,
+    verbose: bool = False,
+) -> tuple[logging.Logger, Path]:
+    """Attach handlers to the run logger.
+
+    A :class:`logging.FileHandler` always writes the structured INFO
+    messages to ``run.log``. When ``verbose`` is True an additional
+    :class:`logging.StreamHandler` mirrors the same records to stderr so the
+    user can follow iteration/round/feature-selection progress in the terminal
+    instead of seeing only Optuna's own per-trial output.
+    """
     path = run_dir / "run.log"
     logger = logging.getLogger(f"automl_xgboost.{run_id}")
     logger.handlers.clear()
     logger.propagate = False
     logger.setLevel(logging.INFO)
-    handler = logging.FileHandler(path, encoding="utf-8")
-    handler.setFormatter(
-        logging.Formatter(
-            "%(asctime)s %(levelname)s run_id=%(run_id)s trial=%(trial_number)s %(message)s",
-            defaults={"run_id": run_id, "trial_number": "-"},
-        )
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s run_id=%(run_id)s trial=%(trial_number)s %(message)s",
+        defaults={"run_id": run_id, "trial_number": "-"},
     )
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(formatter)
     logger.addHandler(handler)
+    if verbose:
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
     return logger, path
 
 
