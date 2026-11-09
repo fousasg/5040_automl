@@ -8,7 +8,7 @@ This is the H2O-free implementation. It uses only XGBoost for modeling, Optuna f
 - One shared deterministic fold assignment for every Optuna trial
 - Best model selected from combined out-of-fold predictions
 - Optional caller-provided folds and numeric monotonicity constraints
-- **Iterative optimization with automatic variable selection**: each iteration can run up to three sub-rounds — Round 1 (hyper-parameters), an optional Round 1b importance-based backward elimination, and Round 2 (Optuna feature selection) — and carries the winning configuration forward. An optional **bottom-up variable reduction** step (iteration 1 only) drops low-importance predictors and seeds Round 2 from the survivor model.
+- **Iterative optimization with automatic variable selection**: each iteration can run up to three sub-rounds — Round 1 (hyper-parameters), an optional Round 1b importance-based backward elimination, and Round 2 (Optuna feature selection) — and carries the winning configuration forward. An optional **bottom-up variable reduction** step (iteration 1 only) drops low-importance predictors and seeds Round 2 from the survivor model. An optional **multimodel variable reduction** pre-iteration stage splits predictors into random low-overlap groups, fits one model per group, averages SHAP-based importance, excludes the bottom predictors, and releases the top survivors across iteration 1 and iteration 2.
 - Native XGBoost missing-value routing: predictor nulls are not imputed and rows are not dropped
 - Native categorical features with stable pandas category domains
 - Out-of-fold predictions, full-data in-sample predictions, full-row SHAP values, optimization graphs, JSON model, metadata, and checksummed manifest
@@ -106,9 +106,13 @@ After the rounds, the iteration picks whichever round produced the better CV sco
 
 When `bottom_up_variable_reduction` is enabled, an extra reduction step runs in **iteration 1 only**, after Round 1 (or Round 1b if it ran). It fits the best model, ranks predictors by XGBoost variable importance, drops every predictor whose importance is below `bottom_up_importance_threshold`, and rebuilds a model via cross-validation on the survivors. That survivor model becomes the **starting point (anchor) of Round 2**: Round 2's anchor trial starts with only the survivors selected and the dropped predictors unselected, but the dropped predictors **remain available** in Round 2's candidate pool, so Round 2 can re-select them if doing so improves the score. Round 1 of iteration 1 uses `bottom_up_n_trials` trials (falls back to `n_trials` when unset) so a stronger importance ranking feeds the reduction.
 
+### Multimodel variable reduction (pre-iteration stage)
+
+When `multimodel_variable_reduction` is enabled, a variable-reduction stage runs **once at the very start of the pipeline**, before iteration 1. The predictors are split into `multimodel_n_models` random, low-overlap groups (each predictor appears in approximately `multimodel_variable_appearances` groups, so each model runs with about `len(predictors) * multimodel_variable_appearances / multimodel_n_models` predictors; when the totals don't divide evenly, group sizes vary by ±1). One XGBoost model is fit per group, SHAP-based variable importance is computed and saved for each model (`multimodel_importance.csv`), and the importance is averaged across the models. The bottom `multimodel_exclude_bottom` predictors are then excluded (an int count or a float bottom fraction) and **permanently removed** from the pipeline. The surviving predictors are split in two: the top `multimodel_top_k` are made available from iteration 1, and the rest are held out of iteration 1 and **introduced in the Round 2 candidate pool of iteration 2** (so Round 2 of iteration 2 can select them). Round 1 of iteration 1 runs with `bottom_up_n_trials` trials when that is set. This is independent of the Round 1b and bottom-up reductions; all three can be enabled together.
+
 ### Configuration
 
-Eight fields control the behavior:
+The fields controlling the behavior:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -121,6 +125,11 @@ Eight fields control the behavior:
 | `bottom_up_variable_reduction` | bool | `false` | Enable the bottom-up importance-threshold reduction in iteration 1 |
 | `bottom_up_n_trials` | int | none | Optuna trials for Round 1 of iteration 1 when bottom-up reduction is active (falls back to `n_trials` when unset) |
 | `bottom_up_importance_threshold` | float | none | XGBoost variable-importance threshold below which predictors are dropped by the bottom-up reduction (importances normalized to sum to 1). When unset, the threshold is computed dynamically from the number of predictors as `(1 / n_predictors) / 2` (half the average importance); set an explicit float to use a fixed threshold instead. |
+| `multimodel_variable_reduction` | bool | `false` | Enable the multimodel variable-reduction pre-iteration stage |
+| `multimodel_n_models` | int | `10` | Number of XGBoost models fit in the multimodel stage |
+| `multimodel_variable_appearances` | int | `3` | Number of groups each predictor appears in (so each model runs with about `len(predictors) * multimodel_variable_appearances / multimodel_n_models` predictors; when totals don't divide evenly, group sizes vary by ±1) |
+| `multimodel_exclude_bottom` | int / float | `0.1` | Bottom predictors to exclude: an int ≥ 1 (a count) or a float 0 < x < 1 (a bottom fraction, e.g. `0.1` = bottom 10%) |
+| `multimodel_top_k` | int | `10` | Number of surviving predictors made available from iteration 1; the rest are introduced in iteration 2 Round 2 |
 
 With the defaults (`iterations: 1`, `feature_selection: false`), behavior is identical to the original single-pass pipeline.
 
@@ -143,6 +152,11 @@ round1b_iterations: 1          # run round1b only in iteration 1
 bottom_up_variable_reduction: true   # importance-threshold reduction in iteration 1
 bottom_up_n_trials: 60           # more Round1 trials in iteration 1
 bottom_up_importance_threshold: 0.01
+multimodel_variable_reduction: true    # pre-iteration multimodel stage
+multimodel_n_models: 10
+multimodel_variable_appearances: 3
+multimodel_exclude_bottom: 0.1         # exclude bottom 10%
+multimodel_top_k: 15                     # 15 predictors from iteration 1
 output_dir: runs/with_feature_selection
 ```
 
@@ -168,6 +182,11 @@ result = run_automl(AutoMLConfig(
     bottom_up_variable_reduction=True,
     bottom_up_n_trials=40,
     bottom_up_importance_threshold=0.01,
+    multimodel_variable_reduction=True,
+    multimodel_n_models=10,
+    multimodel_variable_appearances=3,
+    multimodel_exclude_bottom=0.1,
+    multimodel_top_k=15,
     output_dir="runs/feature_selection_example",
 ))
 

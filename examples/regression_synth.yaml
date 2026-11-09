@@ -7,7 +7,7 @@ algorithms: [xgboost]
 n_folds: 4
 n_trials: 15
 seed: 42
-output_dir: ../runs/regression_synth_all_bottomup
+output_dir: ../runs/regression_synth_all_multimodel
 output_format: csv
 explain_sample_size: 80
 n_jobs: 10
@@ -26,8 +26,21 @@ feature_selection: true
 feature_selection_trials: 15
 max_selected_features: 50
 
-round1b_iterations: 1
+# round1b_iterations: 1
 
+# Bottom-up variable reduction (optional, iteration 1 only).
+bottom_up_variable_reduction: false
+# bottom_up_n_trials: 2
+# bottom_up_importance_threshold: 0.01   # fixed; unset -> dynamic (1/n_predictors)/2
 
-bottom_up_variable_reduction: true
-bottom_up_n_trials: 2
+# Multimodel variable reduction (optional, runs once before iteration 1).
+# Splits predictors into random low-overlap groups, fits one model per group,
+# averages SHAP importance, excludes the bottom predictors
+# (permanently), and releases top_k in iteration 1 / rest in iteration 2.
+# Group sizes vary by ±1 when len(predictors)*appearances is not
+# divisible by multimodel_n_models.
+multimodel_variable_reduction: true
+multimodel_n_models: 11
+multimodel_variable_appearances: 3
+multimodel_exclude_bottom: 10       # int count or float 0 < x < 1 fraction
+multimodel_top_k: 10

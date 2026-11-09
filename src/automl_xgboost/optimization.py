@@ -638,6 +638,258 @@ def run_bottom_up_reduction(
     return survivors, score
 
 
+# Modest default hyper-parameters for the multimodel reduction models.
+# These models exist only to produce SHAP-based variable importance, not to be
+# the final predictor, so a shallow, fast configuration is used.
+_MULTIMODEL_DEFAULT_PARAMS: dict[str, Any] = {
+    "n_estimators": 200,
+    "max_depth": 6,
+    "learning_rate": 0.05,
+    "min_child_weight": 1.0,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "reg_lambda": 1.0,
+    "reg_alpha": 0.0,
+    "gamma": 0.0,
+}
+
+
+def _build_variable_groups(
+    predictors: list[str],
+    n_models: int,
+    appearances: int,
+    seed: int,
+) -> list[list[str]]:
+    """Split predictors into ``n_models`` random, low-overlap groups.
+
+    Each predictor appears in approximately ``appearances`` groups (within
+    ±1) and every group has size ``len(predictors) * appearances // n_models``
+    (±1 when the totals do not divide evenly). Predictors are assigned one
+    at a time (in random order) to the `appearances` groups with the most
+    remaining capacity that do not already contain the predictor; this balances
+    group filling (no group fills too early and starves late predictors),
+    guarantees no group contains a duplicate predictor, and keeps the
+    per-model group size balanced (within ±1) and the per-predictor
+    appearance count approximately `appearances`. Because the demand
+    (n_predictors * appearances) equals the supply (sum of group
+    capacities), a feasible assignment always exists; the greedy is retried
+    with fresh shuffles (seeded deterministically) until it finds one, so the
+    result is deterministic. Pairwise overlap between groups is random in
+    expectation, which is the "as stratified as possible" given the counts.
+    """
+    if n_models > len(predictors) * appearances:
+        raise ValueError(
+            f"multimodel_n_models({n_models}) cannot exceed the number of "
+            f"predictor appearances ({len(predictors) * appearances})"
+        )
+    if appearances > n_models:
+        raise ValueError(
+            f"multimodel_variable_appearances({appearances}) cannot exceed "
+            f"multimodel_n_models({n_models})"
+        )
+
+    total_slots = len(predictors) * appearances
+    base_size = total_slots // n_models
+    remainder = total_slots % n_models
+    # Distribute the remainder so group sizes vary by at most 1.
+    capacities = [
+        base_size + (1 if index < remainder else 0) for index in range(n_models)
+    ]
+
+    def _attempt(attempt_seed: int) -> list[list[str]] | None:
+        rng = np.random.default_rng(attempt_seed)
+        # Process predictors in random order; shuffle so no predictor
+        # is systematically favored for the early (still-empty) groups.
+        order = list(predictors)
+        rng.shuffle(order)
+        groups: list[list[str]] = [[] for _ in range(n_models)]
+        remaining_capacity = list(capacities)
+        for predictor in order:
+            need = appearances
+            # Pick `need` groups with the most remaining capacity that do
+            # not already contain this predictor. Ties in capacity are
+            # broken randomly so the search is diversified across attempts.
+            chosen: list[int] = []
+            for _ in range(need):
+                eligible = [
+                    index for index in range(n_models)
+                    if remaining_capacity[index] > 0
+                    and index not in set(chosen)
+                    and predictor not in set(groups[index])
+                ]
+                if not eligible:
+                    return None
+                # Prefer the groups with the most remaining capacity.
+                max_cap = max(remaining_capacity[index] for index in eligible)
+                top = [index for index in eligible if remaining_capacity[index] == max_cap]
+                pick = top[int(rng.integers(len(top)))]
+                chosen.append(pick)
+            for index in chosen:
+                groups[index].append(predictor)
+                remaining_capacity[index] -= 1
+        if sum(remaining_capacity) == 0:
+            return groups
+        return None
+
+    for offset in range(200):
+        groups = _attempt(seed + offset * 7919)
+        if groups is not None:
+            return groups
+    raise ValueError(
+        "multimodel grouping failed to find a feasible assignment after 200 "
+        "attempts; use a different combination of models/appearances/"
+        "predictors"
+    )
+
+
+def _compute_shap_importance(
+    model: Any,
+    data: PreparedData,
+    group: list[str],
+    config: AutoMLConfig,
+) -> dict[str, float]:
+    """Mean absolute SHAP value per predictor for one fitted model.
+
+    SHAP is computed on a sample of the training rows (controlled by
+    ``explain_sample_size``) to keep the multimodel stage affordable.
+    Returns a mapping ``{predictor: mean_abs_shap}`` for the predictors
+    in ``group`` (predictors not in the group are absent).
+    """
+    import shap
+
+    sample_size = config.explain_sample_size or len(data.features)
+    if len(data.features) > sample_size:
+        rng = np.random.default_rng(config.seed)
+        indices = np.sort(rng.choice(len(data.features), size=sample_size, replace=False))
+    else:
+        indices = np.arange(len(data.features))
+    background = data.features.iloc[indices][group]
+    try:
+        explainer = shap.TreeExplainer(model, model_output="raw")
+        explanation = explainer(background)
+    except Exception as exc:
+        raise TrainingError(f"SHAP TreeExplainer failed in multimodel stage: {exc}") from exc
+    values = np.asarray(explanation.values)
+    if values.ndim == 3 and values.shape[-1] == 2:
+        values = values[:, :, 1]
+    if values.shape != (len(background), len(group)):
+        raise TrainingError(
+            f"unexpected SHAP shape {values.shape} in multimodel stage; "
+            f"expected {(len(background), len(group))}"
+        )
+    if not np.isfinite(values).all():
+        raise TrainingError("SHAP returned non-finite values in multimodel stage")
+    return {
+        feature: float(np.mean(np.abs(values[:, column])))
+        for column, feature in enumerate(group)
+    }
+
+
+def run_multimodel_variable_reduction(
+    data: PreparedData,
+    config: AutoMLConfig,
+    metric: MetricSpec,
+    run_dir: Path,
+    run_id: str,
+    logger: logging.Logger,
+) -> tuple[list[str], list[str], dict[str, float]]:
+    """Multimodel variable reduction run at the start of the pipeline.
+
+    Splits the predictors into ``multimodel_n_models`` random, low-overlap
+    groups (each predictor appears in
+    ``multimodel_variable_appearances`` groups), fits one XGBoost
+    model per group, computes SHAP-based variable importance for each model
+    and saves it, averages importance across the models, excludes the
+    bottom ``multimodel_exclude_bottom`` predictors (an int count or a
+    float bottom fraction), and splits the survivors into the top
+    ``multimodel_top_k`` (available from iteration 1) and the rest
+    (held out of iteration 1 and introduced in the Round 2 candidate pool
+    of iteration 2). Returns ``(top_k_features, rest_features, importance)``
+    where ``importance`` maps every predictor to its average importance.
+    The excluded bottom predictors are permanently removed from the
+    pipeline (the caller adds them to ``eliminated_by_round1b``).
+    """
+    predictors = list(config.predictors)
+    n_models = config.multimodel_n_models
+    appearances = config.multimodel_variable_appearances
+    groups = _build_variable_groups(predictors, n_models, appearances, config.seed)
+    logger.info(
+        "multimodel variable reduction: %d models, each predictor in %d/%d groups "
+        "(group size = %d)",
+        n_models, appearances, n_models, len(groups[0]) if groups else 0,
+    )
+
+    importance_rows: list[dict[str, Any]] = []
+    per_model_importance: list[dict[str, float]] = []
+    for index, group in enumerate(groups):
+        started = time.perf_counter()
+        model = create_model(config, dict(_MULTIMODEL_DEFAULT_PARAMS), group)
+        model.fit(data.features[group], data.encoded_target, verbose=False)
+        importance = _compute_shap_importance(model, data, group, config)
+        per_model_importance.append(importance)
+        importance_rows.append({
+            "model": index,
+            "group_size": len(group),
+            "group": ",".join(group),
+            **{feature: importance.get(feature, 0.0) for feature in predictors},
+        })
+        logger.info(
+            "multimodel model %d/%d fitted on %d features in %.1fs",
+            index + 1, n_models, len(group), time.perf_counter() - started,
+        )
+
+    # Average importance across the n_models. Predictors that never appeared
+    # in a group contribute 0 for the models they were absent from, so
+    # dividing by n_models is the straightforward average across models.
+    avg_importance: dict[str, float] = {
+        feature: sum(model_importance.get(feature, 0.0) for model_importance in per_model_importance) / n_models
+        for feature in predictors
+    }
+
+    # Persist per-model and average importance.
+    importance_frame = pd.DataFrame(importance_rows)
+    importance_path = run_dir / "multimodel_importance.csv"
+    temporary = importance_path.with_name(f".{importance_path.name}.tmp")
+    try:
+        importance_frame.to_csv(temporary, index=False)
+        temporary.replace(importance_path)
+    except Exception as exc:
+        temporary.unlink(missing_ok=True)
+        raise TrainingError(f"could not write {importance_path.name}: {exc}") from exc
+    logger.info(
+        "multimodel importance written to %s (%d rows)",
+        importance_path, len(importance_frame),
+    )
+
+    # Exclude the bottom N predictors (count or fraction).
+    exclude_count = config._multimodel_exclude_count(len(predictors))
+    ranked = sorted(predictors, key=lambda feature: (-avg_importance[feature], feature))
+    bottom_n = ranked[-exclude_count:] if exclude_count else []
+    survivors = [feature for feature in ranked if feature not in set(bottom_n)]
+    top_k = survivors[: config.multimodel_top_k]
+    rest = [feature for feature in survivors if feature not in set(top_k)]
+    logger.info(
+        "multimodel variable reduction finished: excluded %d bottom predictors, "
+        "survivors=%d (top_k=%d for iteration 1, rest=%d for iteration 2 round 2)",
+        len(bottom_n), len(survivors), len(top_k), len(rest),
+    )
+    if bottom_n:
+        logger.info(
+            "multimodel permanently excluded bottom %d predictors: %s",
+            len(bottom_n), ",".join(sorted(bottom_n)),
+        )
+    logger.info(
+        "multimodel top %d for iteration 1: %s",
+        len(top_k), ",".join(top_k),
+    )
+    if rest:
+        logger.info(
+            "multimodel rest %d (introduced in iteration 2 round 2): %s",
+            len(rest), ",".join(rest),
+        )
+    return top_k, rest, avg_importance
+
+
 def run_iterative_optimization(
     data: PreparedData,
     config: AutoMLConfig,
@@ -661,8 +913,32 @@ def run_iterative_optimization(
 
     # Features permanently removed by the round1b elimination (first iteration
     # only). They are excluded from the Round 2 candidate pool in every
-    # subsequent iteration so they can never be re-selected.
+    # subsequent iteration so they can never be re-selected. Bottom-up
+    # dropped features are NOT added here (they stay selectable).
     eliminated_by_round1b: set[str] = set()
+
+    # Multimodel-reduction "rest" predictors: held out of iteration 1
+    # and released (introduced into the Round 2 candidate pool) at the
+    # end of iteration 1, i.e. they become selectable in iteration 2.
+    held_from_iteration1: set[str] = set()
+
+    # Multimodel variable reduction runs once at the very start of the
+    # pipeline (before iteration 1). It permanently excludes the bottom-N
+    # predictors and splits the survivors into top_k (active from iteration 1)
+    # and rest (introduced in iteration 2 round 2).
+    if config.multimodel_variable_reduction:
+        logger.info("multimodel variable reduction stage started")
+        top_k, rest, importance = run_multimodel_variable_reduction(
+            data, config, metric, run_dir, f"{run_id}_multimodel", logger,
+        )
+        eliminated_by_round1b |= set(config.predictors) - set(top_k) - set(rest)
+        active_features = list(top_k)
+        held_from_iteration1 = set(rest)
+        logger.info(
+            "multimodel stage set iteration 1 active features=%d (top_k), "
+            "rest=%d held for iteration 2 round 2, permanently excluded=%d",
+            len(active_features), len(rest), len(eliminated_by_round1b),
+        )
 
     r2_shared_study: Any | None = None
     # Round 1 study carried across iterations. When the previous
@@ -864,6 +1140,7 @@ def run_iterative_optimization(
             round2_candidates = [
                 feature for feature in config.predictors
                 if feature not in eliminated_by_round1b
+                and (iteration > 1 or feature not in held_from_iteration1)
             ]
             logger.info(
                 "iteration %d/%d: round2 (feature selection) from %d candidates, "
@@ -895,6 +1172,16 @@ def run_iterative_optimization(
 
         active_features = list(iter_features)
         prev_iter_best_params = dict(iter_params)
+
+        # Release the multimodel "rest" predictors after iteration 1 so
+        # they re-enter the Round 2 candidate pool in iteration 2.
+        if iteration == 1 and held_from_iteration1:
+            logger.info(
+                "iteration 1 complete: releasing %d held 'rest' predictors for "
+                "iteration 2 round 2",
+                len(held_from_iteration1),
+            )
+            held_from_iteration1 = set()
 
         if search_state is not None:
             refine_search_state(search_state, iter_params, config.refine_factor)

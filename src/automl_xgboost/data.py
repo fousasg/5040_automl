@@ -37,7 +37,7 @@ def load_dataset(dataset: Path | pd.DataFrame) -> pd.DataFrame:
         raise DataValidationError(f"dataset does not exist: {path}")
     try:
         if path.suffix.lower() == ".csv":
-            return pd.read_csv(path)
+            return pd.read_csv(path, low_memory=False)
         if path.suffix.lower() in {".parquet", ".pq"}:
             return pd.read_parquet(path)
     except Exception as exc:

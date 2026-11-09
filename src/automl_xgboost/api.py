@@ -54,11 +54,17 @@ def run_automl(config: AutoMLConfig | dict[str, Any]) -> AutoMLResult:
         logger.info(
             "config: task=%s scorer=%s direction=%s n_trials=%d n_folds=%d iterations=%d "
             "feature_selection=%s max_selected_features=%s round1b_iterations=%d "
-            "bottom_up_variable_reduction=%s bottom_up_importance_threshold=%s seed=%d n_jobs=%d",
+            "bottom_up_variable_reduction=%s bottom_up_importance_threshold=%s "
+            "multimodel_variable_reduction=%s multimodel_n_models=%d "
+            "multimodel_variable_appearances=%d multimodel_exclude_bottom=%s "
+            "multimodel_top_k=%d seed=%d n_jobs=%d",
             config.task, config.scorer, metric.direction, config.n_trials, config.n_folds,
             config.iterations, config.feature_selection, config.max_selected_features,
             config.round1b_iterations, config.bottom_up_variable_reduction,
-            bottom_up_threshold_log, config.seed, config.n_jobs,
+            bottom_up_threshold_log, config.multimodel_variable_reduction,
+            config.multimodel_n_models, config.multimodel_variable_appearances,
+            config.multimodel_exclude_bottom, config.multimodel_top_k,
+            config.seed, config.n_jobs,
         )
         logger.info(
             "data: rows=%d predictors=%d (%s) monotonicity=%s",
@@ -217,6 +223,9 @@ def run_automl(config: AutoMLConfig | dict[str, Any]) -> AutoMLResult:
             (model_path, "application/json", None),
             (log_path, "text/plain", None),
         ]
+        multimodel_importance_path = run_dir / "multimodel_importance.csv"
+        if multimodel_importance_path.is_file():
+            inventory.append((multimodel_importance_path, "text/csv", None))
         inventory.extend((asset, "image/png", None) for asset in report_assets)
         if optuna_database:
             inventory.append((optuna_database, "application/vnd.sqlite3", None))
@@ -241,6 +250,9 @@ def run_automl(config: AutoMLConfig | dict[str, Any]) -> AutoMLResult:
             partial_dependence_plot=partial_dependence_path,
             variable_importance=variable_importance_path,
             variable_importance_plot=variable_importance_plot_path,
+            multimodel_importance=(
+                multimodel_importance_path if multimodel_importance_path.is_file() else None
+            ),
             shap_values=shap_path,
             shap_report=report_path,
             model=model_path,

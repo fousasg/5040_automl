@@ -40,3 +40,10 @@ bottom_up_variable_reduction: false
 bottom_up_n_trials: 20         # round1 trials in iteration 1 (default: n_trials)
 # bottom_up_importance_threshold: 0.01   # fixed threshold; unset -> dynamic (1/n_predictors)/2
 
+# Multimodel variable reduction (optional, runs once before iteration 1).
+# multimodel_variable_reduction: false
+# multimodel_n_models: 10
+# multimodel_variable_appearances: 3
+# multimodel_exclude_bottom: 0.1       # int count or float 0 < x < 1 fraction
+# multimodel_top_k: 15
+
