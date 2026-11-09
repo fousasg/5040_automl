@@ -9,4 +9,5 @@ automl_runs/
 *.egg-info/
 dist/
 build/
+.vscode
 

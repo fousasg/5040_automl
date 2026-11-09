@@ -26,6 +26,7 @@ class AutoMLArtifacts:
     model_metadata: Path
     optuna_database: Path | None
     log: Path
+    multimodel_importance: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)

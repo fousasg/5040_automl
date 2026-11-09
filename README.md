@@ -8,7 +8,7 @@ This is the H2O-free implementation. It uses only XGBoost for modeling, Optuna f
 - One shared deterministic fold assignment for every Optuna trial
 - Best model selected from combined out-of-fold predictions
 - Optional caller-provided folds and numeric monotonicity constraints
-- **Iterative optimization with automatic variable selection**: each iteration runs two sub-rounds — one for hyper-parameters (Round 1) and one for feature selection (Round 2) — and carries the winning configuration forward
+- **Iterative optimization with automatic variable selection**: each iteration can run up to three sub-rounds — Round 1 (hyper-parameters), an optional Round 1b importance-based backward elimination, and Round 2 (Optuna feature selection) — and carries the winning configuration forward. An optional **bottom-up variable reduction** step (iteration 1 only) drops low-importance predictors and seeds Round 2 from the survivor model. An optional **multimodel variable reduction** pre-iteration stage splits predictors into random low-overlap groups, fits one model per group, averages SHAP-based importance, excludes the bottom predictors, and releases the top survivors across iteration 1 and iteration 2.
 - Native XGBoost missing-value routing: predictor nulls are not imputed and rows are not dropped
 - Native categorical features with stable pandas category domains
 - Out-of-fold predictions, full-data in-sample predictions, full-row SHAP values, optimization graphs, JSON model, metadata, and checksummed manifest
@@ -41,6 +41,22 @@ automl-xgboost run --config examples/classification.yaml
 ```
 
 Results are written under `runs/`. The bundled example configs keep trial counts low enough for smoke tests; increase `n_trials` and `feature_selection_trials` for real model selection.
+
+### Verbose / console logging
+
+By default the pipeline writes structured progress INFO messages only to `run.log`, so the terminal shows Optuna's own per-trial output and the final JSON status line. Set `verbose: true` (or pass `--verbose`) to mirror the same INFO messages — `run_started`, config/data summary, iteration/round progress, feature-selection trials, bottom-up reduction, refinement bounds, optimization/refit/SHAP/run-completed summaries — to stderr while the run is in progress.
+
+```bash
+automl-xgboost run --config examples/regression.yaml --verbose
+```
+
+```yaml
+verbose: true
+```
+
+```python
+result = run_automl(AutoMLConfig(..., verbose=True))
+```
 
 Reactivate or remove the environment later:
 
@@ -78,16 +94,25 @@ print(result.artifacts.manifest)
 
 By default the pipeline runs a single Optuna study that tunes XGBoost hyper-parameters using all provided predictors. Enabling feature selection adds a second optimization dimension: the pipeline alternates between tuning hyper-parameters and selecting which predictors to keep.
 
-Each iteration consists of two sub-rounds:
+Each iteration can consist of up to three sub-rounds:
 
 1. **Round 1 (hyper-parameters)** — Optuna TPE searches over XGBoost hyper-parameters while holding the active feature set fixed. When `iterations > 1`, the search space is progressively narrowed around the best values using `refine_factor` (the Cyprus-Uni search-space refinement approach).
-2. **Round 2 (feature selection)** — Fixes hyper-parameters to Round 1's best and uses Optuna binary flags (one per predictor) to search over feature subsets. The first trial is an anchor that preserves the Round 1 result as a baseline, so feature selection can never regress below the hyper-parameter-only result.
+2. **Round 1b (importance-based backward elimination)** — Optional, runs only in the first `round1b_iterations` iterations. Fixes hyper-parameters to Round 1's best, fits a model, ranks predictors by XGBoost variable importance, and repeatedly drops the least-important survivor. A drop that degrades the CV score does not stop the search; the next least-important predictor is tried instead, and the search stops only after 3 consecutive failures. Every predictor dropped by Round1b is **permanently removed** from the Round 2 candidate pool in all later iterations.
+3. **Round 2 (feature selection)** — Fixes hyper-parameters to Round 1's best and uses Optuna binary flags (one per predictor) to search over feature subsets. The first trial is an anchor that preserves the Round 1/Round1b result as a baseline, so feature selection can never regress below the hyper-parameter-only result. The candidate pool is all original predictors except those permanently eliminated by Round1b.
 
-After both rounds, the iteration picks whichever round produced the better CV score and carries that feature set and parameters forward to the next iteration.
+After the rounds, the iteration picks whichever round produced the better CV score and carries that feature set and parameters forward to the next iteration.
+
+### Bottom-up variable reduction (iteration 1 only)
+
+When `bottom_up_variable_reduction` is enabled, an extra reduction step runs in **iteration 1 only**, after Round 1 (or Round 1b if it ran). It fits the best model, ranks predictors by XGBoost variable importance, drops every predictor whose importance is below `bottom_up_importance_threshold`, and rebuilds a model via cross-validation on the survivors. That survivor model becomes the **starting point (anchor) of Round 2**: Round 2's anchor trial starts with only the survivors selected and the dropped predictors unselected, but the dropped predictors **remain available** in Round 2's candidate pool, so Round 2 can re-select them if doing so improves the score. Round 1 of iteration 1 uses `bottom_up_n_trials` trials (falls back to `n_trials` when unset) so a stronger importance ranking feeds the reduction.
+
+### Multimodel variable reduction (pre-iteration stage)
+
+When `multimodel_variable_reduction` is enabled, a variable-reduction stage runs **once at the very start of the pipeline**, before iteration 1. The predictors are split into `multimodel_n_models` random, low-overlap groups (each predictor appears in approximately `multimodel_variable_appearances` groups, so each model runs with about `len(predictors) * multimodel_variable_appearances / multimodel_n_models` predictors; when the totals don't divide evenly, group sizes vary by ±1). One XGBoost model is fit per group, SHAP-based variable importance is computed and saved for each model (`multimodel_importance.csv`), and the importance is averaged across the models. The bottom `multimodel_exclude_bottom` predictors are then excluded (an int count or a float bottom fraction) and **permanently removed** from the pipeline. The surviving predictors are split in two: the top `multimodel_top_k` are made available from iteration 1, and the rest are held out of iteration 1 and **introduced in the Round 2 candidate pool of iteration 2** (so Round 2 of iteration 2 can select them). Round 1 of iteration 1 runs with `bottom_up_n_trials` trials when that is set. This is independent of the Round 1b and bottom-up reductions; all three can be enabled together.
 
 ### Configuration
 
-Five fields control the behavior:
+The fields controlling the behavior:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -97,6 +122,14 @@ Five fields control the behavior:
 | `feature_selection_trials` | int | `n_trials` | Optuna trials for the feature-selection round (defaults to `n_trials` when omitted) |
 | `max_selected_features` | int | none | Optional cap on how many features Round 2 can select |
 | `round1b_iterations` | int | `1` | Number of iterations (from iteration 1) in which the importance-based backward elimination (round1b) runs. `0` disables it; `1` runs it only in the first iteration; values > 1 run it in the first N iterations. Features eliminated by round1b are permanently removed from the Round 2 candidate pool in every later iteration. |
+| `bottom_up_variable_reduction` | bool | `false` | Enable the bottom-up importance-threshold reduction in iteration 1 |
+| `bottom_up_n_trials` | int | none | Optuna trials for Round 1 of iteration 1 when bottom-up reduction is active (falls back to `n_trials` when unset) |
+| `bottom_up_importance_threshold` | float | none | XGBoost variable-importance threshold below which predictors are dropped by the bottom-up reduction (importances normalized to sum to 1). When unset, the threshold is computed dynamically from the number of predictors as `(1 / n_predictors) / 2` (half the average importance); set an explicit float to use a fixed threshold instead. |
+| `multimodel_variable_reduction` | bool | `false` | Enable the multimodel variable-reduction pre-iteration stage |
+| `multimodel_n_models` | int | `10` | Number of XGBoost models fit in the multimodel stage |
+| `multimodel_variable_appearances` | int | `3` | Number of groups each predictor appears in (so each model runs with about `len(predictors) * multimodel_variable_appearances / multimodel_n_models` predictors; when totals don't divide evenly, group sizes vary by ±1) |
+| `multimodel_exclude_bottom` | int / float | `0.1` | Bottom predictors to exclude: an int ≥ 1 (a count) or a float 0 < x < 1 (a bottom fraction, e.g. `0.1` = bottom 10%) |
+| `multimodel_top_k` | int | `10` | Number of surviving predictors made available from iteration 1; the rest are introduced in iteration 2 Round 2 |
 
 With the defaults (`iterations: 1`, `feature_selection: false`), behavior is identical to the original single-pass pipeline.
 
@@ -115,6 +148,15 @@ iterations: 3
 feature_selection: true
 feature_selection_trials: 30
 max_selected_features: 5
+round1b_iterations: 1          # run round1b only in iteration 1
+bottom_up_variable_reduction: true   # importance-threshold reduction in iteration 1
+bottom_up_n_trials: 60           # more Round1 trials in iteration 1
+bottom_up_importance_threshold: 0.01
+multimodel_variable_reduction: true    # pre-iteration multimodel stage
+multimodel_n_models: 10
+multimodel_variable_appearances: 3
+multimodel_exclude_bottom: 0.1         # exclude bottom 10%
+multimodel_top_k: 15                     # 15 predictors from iteration 1
 output_dir: runs/with_feature_selection
 ```
 
@@ -136,6 +178,15 @@ result = run_automl(AutoMLConfig(
     feature_selection=True,
     feature_selection_trials=20,
     max_selected_features=3,
+    round1b_iterations=1,
+    bottom_up_variable_reduction=True,
+    bottom_up_n_trials=40,
+    bottom_up_importance_threshold=0.01,
+    multimodel_variable_reduction=True,
+    multimodel_n_models=10,
+    multimodel_variable_appearances=3,
+    multimodel_exclude_bottom=0.1,
+    multimodel_top_k=15,
     output_dir="runs/feature_selection_example",
 ))
 

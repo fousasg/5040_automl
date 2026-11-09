@@ -51,6 +51,52 @@ class AutoMLConfig(BaseModel):
     # permanently removed from the Round 2 candidate pool in every later
     # iteration regardless of this setting.
     round1b_iterations: int = Field(default=1, ge=0)
+    # Bottom-up variable reduction: after Round 1 (or Round 1b if enabled) of
+    # iteration 1, fit the best model, rank predictors by XGBoost variable
+    # importance, drop those below ``bottom_up_importance_threshold``, rebuild via
+    # cross-validation on the survivors, and treat that model as the best from
+    # this point onward. The survivor set also seeds the Round 2 Optuna study.
+    bottom_up_variable_reduction: bool = False
+    # Number of Optuna trials for Round 1 of iteration 1 when bottom-up variable
+    # reduction is active. When None (default), falls back to ``n_trials``.
+    bottom_up_n_trials: int | None = Field(default=None, ge=1)
+    # XGBoost variable-importance threshold below which predictors are dropped
+    # by the bottom-up reduction (importances are normalized to sum to 1).
+    # When None (default), the threshold is computed dynamically from
+    # the number of predictors the bottom-up model is built on as
+    # ``(1 / n_predictors) / 2`` (half the average importance); set an
+    # explicit float to use a fixed threshold instead.
+    bottom_up_importance_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Multimodel variable reduction: a pre-iteration stage that splits the
+    # predictors into ``multimodel_n_models`` random, low-overlap groups
+    # (each predictor appears in ``multimodel_variable_appearances`` groups,
+    # so each model runs with
+    # ``len(predictors) * multimodel_variable_appearances / multimodel_n_models``
+    # predictors), fits one XGBoost model per group, computes SHAP-based
+    # variable importance for each, averages importance across the models,
+    # excludes the bottom ``multimodel_exclude_bottom`` predictors (an int
+    # count, or a float 0 < x < 1 bottom fraction), then splits the
+    # survivors into the top ``multimodel_top_k`` (available from iteration 1)
+    # and the rest (held out of iteration 1 and introduced in the Round 2
+    # candidate pool of iteration 2). The excluded bottom predictors are
+    # permanently removed from the pipeline.
+    multimodel_variable_reduction: bool = False
+    multimodel_n_models: int = Field(default=10, ge=1)
+    multimodel_variable_appearances: int = Field(default=3, ge=1)
+    # Bottom predictors to exclude: an int >= 1 (a count) or a float
+    # 0 < x < 1 (a bottom fraction, e.g. 0.1 = bottom 10%).
+    multimodel_exclude_bottom: int | float = Field(default=0.1)
+    # Number of surviving predictors (after excluding the bottom ones) made
+    # available from iteration 1; the rest are introduced in iteration 2.
+    multimodel_top_k: int = Field(default=10, ge=1)
+    # Mirror the run.log INFO messages to the console (stderr) while the run
+    # is in progress. When False (default), the application logger only
+    # writes to run.log and the terminal shows Optuna's own per-trial output;
+    # when True, the same structured INFO lines (run_started, config/data
+    # summary, iteration/round progress, feature-selection trials, bottom-up
+    # reduction, refinement bounds, optimization/refit/shap/run_completed) are
+    # also printed to stderr.
+    verbose: bool = False
     seed: int = 42
     output_dir: Path = Path("automl_runs")
     overwrite: bool = False
@@ -83,6 +129,21 @@ class AutoMLConfig(BaseModel):
         if value == 0:
             raise ValueError("n_jobs cannot be zero")
         return value
+
+    @field_validator("multimodel_exclude_bottom")
+    @classmethod
+    def multimodel_exclude_bottom_kind(cls, value: int | float) -> int | float:
+        if isinstance(value, bool):  # bool is an int subclass; reject explicitly
+            raise ValueError("multimodel_exclude_bottom must be an int count or a float fraction")
+        if isinstance(value, int):
+            if value < 1:
+                raise ValueError("int multimodel_exclude_bottom must be >= 1")
+            return value
+        if isinstance(value, float):
+            if not 0.0 < value < 1.0:
+                raise ValueError("float multimodel_exclude_bottom must be between 0 and 1 (exclusive)")
+            return value
+        raise ValueError("multimodel_exclude_bottom must be an int count or a float fraction")
 
     @field_validator("predictors")
     @classmethod
@@ -120,7 +181,34 @@ class AutoMLConfig(BaseModel):
         unknown = set(self.monotonicity_constraints) - set(self.predictors)
         if unknown:
             raise ValueError(f"constrained columns must be predictors: {sorted(unknown)}")
+        # Each predictor appears in `multimodel_variable_appearances` groups across
+        # `multimodel_n_models` models, so the average per-model group size is
+        # len(predictors) * appearances / n_models. The totals do not have to
+        # divide evenly: when they don't, group sizes vary by ±1 and each
+        # predictor appears approximately `appearances` times (within ±1),
+        # which is the "as stratified as possible" given the counts.
+        if self.multimodel_variable_reduction:
+            if self.multimodel_n_models > len(self.predictors) * self.multimodel_variable_appearances:
+                raise ValueError(
+                    "multimodel_n_models cannot exceed the number of "
+                    "predictor appearances"
+                )
+            survivors_upper = len(self.predictors) - self._multimodel_exclude_count(len(self.predictors))
+            if self.multimodel_top_k > survivors_upper:
+                raise ValueError(
+                    f"multimodel_top_k({self.multimodel_top_k}) is larger than the "
+                    f"surviving predictors after exclusion ({survivors_upper})"
+                )
         return self
+
+    def _multimodel_exclude_count(self, n_predictors: int) -> int:
+        """Resolve `multimodel_exclude_bottom` to an integer count."""
+        value = self.multimodel_exclude_bottom
+        if isinstance(value, int):
+            count = value
+        else:  # float fraction 0 < x < 1
+            count = int(round(value * n_predictors))
+        return max(0, min(count, n_predictors))
 
     def redacted_dict(self) -> dict[str, Any]:
         dumped = self.model_dump(mode="python")

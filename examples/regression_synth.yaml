@@ -4,10 +4,10 @@ task: regression
 scorer: rmse
 predictors: [s_cont1,s_cont2,s_cont3,s_cont4,s_int1,s_int2,s_int3,s_cat1,s_cat2,s_cat3,w_cont1,w_cont2,w_cont3,w_cont4,w_cont5,w_cont6,w_cont7,w_int1,w_int2,w_int3,w_int4,w_int5,w_int6,w_cat1,w_cat2,w_cat3,w_cat4,w_cat5,w_cat6,w_cat7,n_cont1,n_cont2,n_cont3,n_int1,n_int2,n_int3,n_cat1,n_cat2,n_cat3,n_cat4]
 algorithms: [xgboost]
-n_folds: 6
-n_trials: 100
+n_folds: 4
+n_trials: 15
 seed: 42
-output_dir: ../runs/regression_synth_f6_all_onlyhyper
+output_dir: ../runs/regression_synth_all_multimodel
 output_format: csv
 explain_sample_size: 80
 n_jobs: 10
@@ -20,11 +20,27 @@ monotonicity_constraints:
   s_int1: 1
 
 # Feature selection / iterative optimization (optional):
-iterations: 1
+iterations: 5
 refine_factor: 0.99        # narrow round1 search space by 10% each iteration
-feature_selection: false
-feature_selection_trials: 10
+feature_selection: true
+feature_selection_trials: 15
 max_selected_features: 50
 
-round1b_iterations: 0
+# round1b_iterations: 1
 
+# Bottom-up variable reduction (optional, iteration 1 only).
+bottom_up_variable_reduction: false
+# bottom_up_n_trials: 2
+# bottom_up_importance_threshold: 0.01   # fixed; unset -> dynamic (1/n_predictors)/2
+
+# Multimodel variable reduction (optional, runs once before iteration 1).
+# Splits predictors into random low-overlap groups, fits one model per group,
+# averages SHAP importance, excludes the bottom predictors
+# (permanently), and releases top_k in iteration 1 / rest in iteration 2.
+# Group sizes vary by ±1 when len(predictors)*appearances is not
+# divisible by multimodel_n_models.
+multimodel_variable_reduction: true
+multimodel_n_models: 11
+multimodel_variable_appearances: 3
+multimodel_exclude_bottom: 10       # int count or float 0 < x < 1 fraction
+multimodel_top_k: 10

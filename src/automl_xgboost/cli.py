@@ -43,6 +43,16 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--feature-selection-trials", type=int)
     run.add_argument("--max-selected-features", type=int)
     run.add_argument("--round1b-iterations", type=int)
+    run.add_argument("--bottom-up-variable-reduction", action=argparse.BooleanOptionalAction, default=None)
+    run.add_argument("--bottom-up-n-trials", type=int)
+    run.add_argument("--bottom-up-importance-threshold", type=float)
+    run.add_argument("--multimodel-variable-reduction", action=argparse.BooleanOptionalAction, default=None)
+    run.add_argument("--multimodel-n-models", type=int)
+    run.add_argument("--multimodel-variable-appearances", type=int)
+    run.add_argument("--multimodel-exclude-bottom")
+    run.add_argument("--multimodel-top-k", type=int)
+    run.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=None,
+                        help="mirror the run.log INFO messages to the terminal (stderr)")
     run.add_argument("--seed", type=int)
     run.add_argument("--output-dir", type=Path)
     run.add_argument("--output-format", choices=("parquet", "csv"))
@@ -65,7 +75,11 @@ def resolve_cli_config(namespace: argparse.Namespace) -> AutoMLConfig:
         "dataset", "target", "task", "scorer", "predictors", "fold_column", "algorithms",
         "positive_class", "n_folds", "n_trials", "timeout_seconds", "iterations",
         "refine_factor", "feature_selection", "feature_selection_trials",
-        "max_selected_features", "round1b_iterations", "seed", "output_dir",
+        "max_selected_features", "round1b_iterations",
+        "bottom_up_variable_reduction", "bottom_up_n_trials",
+        "bottom_up_importance_threshold", "multimodel_variable_reduction",
+        "multimodel_n_models", "multimodel_variable_appearances",
+        "multimodel_top_k", "verbose", "seed", "output_dir",
         "output_format", "explain_sample_size", "n_jobs", "device", "overwrite",
     ):
         value = getattr(namespace, key, None)
@@ -73,6 +87,8 @@ def resolve_cli_config(namespace: argparse.Namespace) -> AutoMLConfig:
             values[key] = value
     if namespace.monotonicity_constraints is not None:
         values["monotonicity_constraints"] = _mapping(namespace.monotonicity_constraints)
+    if namespace.multimodel_exclude_bottom is not None:
+        values["multimodel_exclude_bottom"] = _exclude_bottom(namespace.multimodel_exclude_bottom)
     optuna = dict(values.get("optuna") or {})
     if namespace.optuna_storage is not None:
         optuna["storage"] = namespace.optuna_storage
@@ -119,6 +135,21 @@ def _mapping(value: str) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         raise ConfigurationError("constraints must be a mapping")
     return loaded
+
+
+def _exclude_bottom(value: str) -> int | float:
+    """Parse --multimodel-exclude-bottom as an int count or a float fraction."""
+    try:
+        loaded = yaml.safe_load(value)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        raise ConfigurationError(f"could not parse multimodel_exclude_bottom: {exc}") from exc
+    if isinstance(loaded, bool):
+        raise ConfigurationError("multimodel_exclude_bottom must be an int count or a float fraction")
+    if isinstance(loaded, int):
+        return loaded
+    if isinstance(loaded, float):
+        return loaded
+    raise ConfigurationError("multimodel_exclude_bottom must be an int count or a float fraction")
 
 
 if __name__ == "__main__":
