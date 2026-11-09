@@ -21,7 +21,10 @@ n_jobs: 2
 
 # Round1b: importance-based backward elimination (optional).
 # round1b_iterations: 1   # 0 disables; 1 (default) iter1 only; N>1 first N iters
-
+# Optional wall-clock budget for the whole iterative optimization.
+# After each iteration completes, the elapsed run time is checked against
+# this value and the remaining iterations are skipped (current best kept).
+# max_run_seconds: 3600
 # Bottom-up variable reduction (optional, iteration 1 only).
 # bottom_up_variable_reduction: false
 # bottom_up_n_trials: 20          # round1 trials in iteration 1 (default: n_trials)

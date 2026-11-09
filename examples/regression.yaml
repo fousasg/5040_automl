@@ -31,6 +31,11 @@ max_selected_features: 3
 # Features dropped by round1b are permanently removed from round2's pool.
 round1b_iterations: 1
 
+# Optional wall-clock budget for the whole iterative optimization.
+# After each iteration completes, the elapsed run time is checked against
+# this value and the remaining iterations are skipped (current best kept).
+# max_run_seconds: 3600
+
 # Bottom-up variable reduction (optional, iteration 1 only).
 # Fits the best model, drops predictors with importance below
 # bottom_up_importance_threshold, and uses that survivor model as the

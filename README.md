@@ -120,8 +120,7 @@ The fields controlling the behavior:
 | `iterations` | int | `1` | Number of refinement iterations |
 | `refine_factor` | float | `0.5` | Fraction to narrow the Round 1 hyper-parameter search space each iteration (0 < value <= 1) |
 | `feature_selection_trials` | int | `n_trials` | Optuna trials for the feature-selection round (defaults to `n_trials` when omitted) |
-| `max_selected_features` | int | none | Optional cap on how many features Round 2 can select |
-| `round1b_iterations` | int | `1` | Number of iterations (from iteration 1) in which the importance-based backward elimination (round1b) runs. `0` disables it; `1` runs it only in the first iteration; values > 1 run it in the first N iterations. Features eliminated by round1b are permanently removed from the Round 2 candidate pool in every later iteration. |
+| `max_selected_features` | int | none | Optional cap on how many features Round 2 can select || `max_run_seconds` | float | none | Optional wall-clock budget for the whole iterative optimization. After each iteration completes, the elapsed run time is compared against this value and the remaining iterations are skipped (the current best is kept). `none` means no run-time limit. || `round1b_iterations` | int | `1` | Number of iterations (from iteration 1) in which the importance-based backward elimination (round1b) runs. `0` disables it; `1` runs it only in the first iteration; values > 1 run it in the first N iterations. Features eliminated by round1b are permanently removed from the Round 2 candidate pool in every later iteration. |
 | `bottom_up_variable_reduction` | bool | `false` | Enable the bottom-up importance-threshold reduction in iteration 1 |
 | `bottom_up_n_trials` | int | none | Optuna trials for Round 1 of iteration 1 when bottom-up reduction is active (falls back to `n_trials` when unset) |
 | `bottom_up_importance_threshold` | float | none | XGBoost variable-importance threshold below which predictors are dropped by the bottom-up reduction (importances normalized to sum to 1). When unset, the threshold is computed dynamically from the number of predictors as `(1 / n_predictors) / 2` (half the average importance); set an explicit float to use a fixed threshold instead. |
@@ -148,6 +147,7 @@ iterations: 3
 feature_selection: true
 feature_selection_trials: 30
 max_selected_features: 5
+max_run_seconds: 3600            # stop iterations after 1 hour wall-clock
 round1b_iterations: 1          # run round1b only in iteration 1
 bottom_up_variable_reduction: true   # importance-threshold reduction in iteration 1
 bottom_up_n_trials: 60           # more Round1 trials in iteration 1
@@ -178,6 +178,7 @@ result = run_automl(AutoMLConfig(
     feature_selection=True,
     feature_selection_trials=20,
     max_selected_features=3,
+    max_run_seconds=3600,
     round1b_iterations=1,
     bottom_up_variable_reduction=True,
     bottom_up_n_trials=40,

@@ -918,9 +918,13 @@ def run_iterative_optimization(
     eliminated_by_round1b: set[str] = set()
 
     # Multimodel-reduction "rest" predictors: held out of iteration 1
-    # and released (introduced into the Round 2 candidate pool) at the
+    # and released (introduced into the Round2 candidate pool) at the
     # end of iteration 1, i.e. they become selectable in iteration 2.
     held_from_iteration1: set[str] = set()
+
+    # Wall-clock budget for the whole optimization. Checked after each
+    # iteration completes; remaining iterations are skipped when exceeded.
+    run_started_perf = time.perf_counter()
 
     # Multimodel variable reduction runs once at the very start of the
     # pipeline (before iteration 1). It permanently excludes the bottom-N
@@ -1201,6 +1205,17 @@ def run_iterative_optimization(
             "iteration %d complete in %.1fs: score=%.6f global_best=%.6f",
             iteration, time.perf_counter() - iteration_started, iter_score, best_score,
         )
+
+        # Stop the remaining iterations when the wall-clock run budget is exceeded.
+        if config.max_run_seconds is not None:
+            elapsed = time.perf_counter() - run_started_perf
+            if elapsed > config.max_run_seconds:
+                logger.info(
+                    "max_run_seconds=%.1f exceeded after iteration %d (elapsed=%.1fs); "
+                    "stopping iterations, keeping current best",
+                    config.max_run_seconds, iteration, elapsed,
+                )
+                break
 
     if best_params is None or best_score is None:
         raise TrainingError("no iteration completed successfully")

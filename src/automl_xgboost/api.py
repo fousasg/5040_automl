@@ -53,14 +53,15 @@ def run_automl(config: AutoMLConfig | dict[str, Any]) -> AutoMLResult:
         )
         logger.info(
             "config: task=%s scorer=%s direction=%s n_trials=%d n_folds=%d iterations=%d "
-            "feature_selection=%s max_selected_features=%s round1b_iterations=%d "
+            "feature_selection=%s max_selected_features=%s max_run_seconds=%s "
+            "round1b_iterations=%d "
             "bottom_up_variable_reduction=%s bottom_up_importance_threshold=%s "
             "multimodel_variable_reduction=%s multimodel_n_models=%d "
             "multimodel_variable_appearances=%d multimodel_exclude_bottom=%s "
             "multimodel_top_k=%d seed=%d n_jobs=%d",
             config.task, config.scorer, metric.direction, config.n_trials, config.n_folds,
             config.iterations, config.feature_selection, config.max_selected_features,
-            config.round1b_iterations, config.bottom_up_variable_reduction,
+            config.max_run_seconds, config.round1b_iterations, config.bottom_up_variable_reduction,
             bottom_up_threshold_log, config.multimodel_variable_reduction,
             config.multimodel_n_models, config.multimodel_variable_appearances,
             config.multimodel_exclude_bottom, config.multimodel_top_k,

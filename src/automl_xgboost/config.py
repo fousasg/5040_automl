@@ -39,6 +39,11 @@ class AutoMLConfig(BaseModel):
     n_folds: int = Field(default=5, ge=2)
     n_trials: int = Field(default=50, ge=1)
     timeout_seconds: float | None = Field(default=None, gt=0)
+    # Optional wall-clock budget for the whole iterative optimization. When set,
+    # after each iteration completes the elapsed run time is compared against
+    # this value and the remaining iterations are skipped (the current best
+    # is kept). None (default) means no run-time limit.
+    max_run_seconds: float | None = Field(default=None, gt=0)
     iterations: int = Field(default=1, ge=1)
     refine_factor: float = Field(default=0.5, gt=0.0, le=1.0)
     feature_selection: bool = False

@@ -28,6 +28,11 @@ max_selected_features: 50
 
 # round1b_iterations: 1
 
+# Optional wall-clock budget for the whole iterative optimization.
+# After each iteration completes, the elapsed run time is checked against
+# this value and the remaining iterations are skipped (current best kept).
+max_run_seconds: 30
+
 # Bottom-up variable reduction (optional, iteration 1 only).
 bottom_up_variable_reduction: false
 # bottom_up_n_trials: 2
