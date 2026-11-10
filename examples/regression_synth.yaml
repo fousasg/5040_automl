@@ -7,7 +7,7 @@ algorithms: [xgboost]
 n_folds: 4
 n_trials: 15
 seed: 42
-output_dir: ../runs/regression_synth_all_multimodel
+output_dir: ../runs/regression_synth_all_multimodel_log
 output_format: csv
 explain_sample_size: 80
 n_jobs: 10
@@ -18,6 +18,16 @@ n_jobs: 10
 monotonicity_constraints:
   s_cont1: 1
   s_int1: 1
+
+# Optional regression target transformation (applied before fitting; predictions
+# are inverted back to the original scale when saved and when scoring).
+# target_transform: cbrt        # log (log1p, non-negative), sqrt (non-negative), cbrt (any), none
+
+# Optional XGBoost objective overriding the regression default (reg:squarederror).
+# When set to reg:gamma and the target contains zeros, a +1 shift is
+# automatically applied to the target so it is strictly positive,
+# and predictions are shifted back (-1) when saved and when scoring.
+# objective: reg:gamma
 
 # Feature selection / iterative optimization (optional):
 iterations: 5

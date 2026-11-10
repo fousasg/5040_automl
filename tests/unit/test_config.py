@@ -37,3 +37,10 @@ def test_redacted_in_memory_configuration():
     assert dumped["dataset"].startswith("<in-memory DataFrame")
     assert "secret" not in dumped["optuna"]["storage"]
 
+
+def test_target_transform_regression_only():
+    config = make_config(target_transform="log")
+    assert config.target_transform == "log"
+    with pytest.raises(ValidationError, match="regression tasks"):
+        make_config(task="classification", target_transform="log")
+

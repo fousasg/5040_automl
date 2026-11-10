@@ -35,8 +35,11 @@ def create_model(
         "monotone_constraints": constraints or None,
     }
     if config.task == "regression":
-        return XGBRegressor(objective="reg:squarederror", eval_metric="rmse", **common)
-    return XGBClassifier(objective="binary:logistic", eval_metric="logloss", **common)
+        objective = config.objective or "reg:squarederror"
+        eval_metric = "rmse" if objective == "reg:squarederror" else None
+        return XGBRegressor(objective=objective, eval_metric=eval_metric, **common)
+    objective = config.objective or "binary:logistic"
+    return XGBClassifier(objective=objective, eval_metric="logloss", **common)
 
 
 def predict_for_score(model: Any, features: pd.DataFrame, task: str) -> np.ndarray:

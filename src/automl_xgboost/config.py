@@ -35,6 +35,19 @@ class AutoMLConfig(BaseModel):
     algorithms: list[str] | None = None
     monotonicity_constraints: dict[str, Literal[-1, 0, 1]] = Field(default_factory=dict)
     positive_class: str | int | float | bool | None = None
+    # Optional XGBoost objective overriding the regression default ``reg:squarederror``
+    # or the classification default ``binary:logistic``. When set to
+    # ``reg:gamma`` and the target contains zeros, a +1 shift is automatically
+    # applied to the target so it is strictly positive, and predictions are
+    # shifted back (-1) when saved and when scoring. Ignored when ``target_transform`` is
+    # set explicitly.
+    objective: str | None = None
+    # Optional transformation applied to a continuous (regression) target
+    # before fitting: ``none`` (default), ``log`` (log1p, requires a non-negative
+    # target), ``sqrt`` (requires non-negative), or ``cbrt`` (cube root,
+    # handles any real values). Predictions are inverted back to the original
+    # scale when saved and when scoring new data. Ignored for classification.
+    target_transform: Literal["none", "log", "sqrt", "cbrt"] = "none"
 
     n_folds: int = Field(default=5, ge=2)
     n_trials: int = Field(default=50, ge=1)
@@ -186,6 +199,10 @@ class AutoMLConfig(BaseModel):
         unknown = set(self.monotonicity_constraints) - set(self.predictors)
         if unknown:
             raise ValueError(f"constrained columns must be predictors: {sorted(unknown)}")
+        if self.task != "regression" and self.target_transform != "none":
+            raise ValueError(
+                "target_transform is only supported for regression tasks"
+            )
         # Each predictor appears in `multimodel_variable_appearances` groups across
         # `multimodel_n_models` models, so the average per-model group size is
         # len(predictors) * appearances / n_models. The totals do not have to

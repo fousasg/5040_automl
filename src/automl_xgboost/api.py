@@ -54,14 +54,15 @@ def run_automl(config: AutoMLConfig | dict[str, Any]) -> AutoMLResult:
         logger.info(
             "config: task=%s scorer=%s direction=%s n_trials=%d n_folds=%d iterations=%d "
             "feature_selection=%s max_selected_features=%s max_run_seconds=%s "
-            "round1b_iterations=%d "
+            "round1b_iterations=%d objective=%s target_transform=%s "
             "bottom_up_variable_reduction=%s bottom_up_importance_threshold=%s "
             "multimodel_variable_reduction=%s multimodel_n_models=%d "
             "multimodel_variable_appearances=%d multimodel_exclude_bottom=%s "
             "multimodel_top_k=%d seed=%d n_jobs=%d",
             config.task, config.scorer, metric.direction, config.n_trials, config.n_folds,
             config.iterations, config.feature_selection, config.max_selected_features,
-            config.max_run_seconds, config.round1b_iterations, config.bottom_up_variable_reduction,
+            config.max_run_seconds, config.round1b_iterations, config.objective,
+            config.target_transform, config.bottom_up_variable_reduction,
             bottom_up_threshold_log, config.multimodel_variable_reduction,
             config.multimodel_n_models, config.multimodel_variable_appearances,
             config.multimodel_exclude_bottom, config.multimodel_top_k,
@@ -118,6 +119,20 @@ def run_automl(config: AutoMLConfig | dict[str, Any]) -> AutoMLResult:
         features_for_predict = data.features if selected_features is None else data.features[selected_features]
         full_prediction = predict_for_score(model, features_for_predict, config.task)
 
+        # `oof` comes from cross_validated_predictions, which already inverts the
+        # regression target transformation chain, so it is in the original scale.
+        # The full-data prediction comes straight from model.predict and is in
+        # the transformed space, so invert it through the chain here for
+        # the saved artifact.
+        from .transforms import invert_transform_chain
+
+        if config.task == "regression" and data.target_transforms:
+            full_prediction = invert_transform_chain(full_prediction, data.target_transforms)
+            logger.info(
+                "target_transforms=%s: full-data predictions inverted to original scale",
+                ",".join(data.target_transforms),
+            )
+
         cv_frame = _prediction_frame(data, oof, config.task, include_fold=True)
         full_frame = _prediction_frame(data, full_prediction, config.task, include_fold=False)
         cv_path = write_dataframe(cv_frame, run_dir / "cv_predictions", config.output_format)
@@ -157,6 +172,7 @@ def run_automl(config: AutoMLConfig | dict[str, Any]) -> AutoMLResult:
             "positive_class": data.class_levels[1] if data.class_levels else None,
             "missing_value": "NaN passed natively to XGBoost",
             "parameters": outcome.best_parameters,
+            "target_transforms": list(data.target_transforms),
         }
         model_metadata_path = atomic_json(run_dir / "model_metadata.json", model_metadata)
 

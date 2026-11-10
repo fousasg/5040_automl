@@ -31,7 +31,7 @@ def write_performance_plot(
     figure, axis = plt.subplots(figsize=(8, 7))
     try:
         if config.task == "regression":
-            actual = data.encoded_target.to_numpy(dtype=float)
+            actual = data.target.to_numpy(dtype=float)
             lower = float(min(actual.min(), predictions.min()))
             upper = float(max(actual.max(), predictions.max()))
             if lower == upper:

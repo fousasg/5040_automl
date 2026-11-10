@@ -8,6 +8,8 @@ This is the H2O-free implementation. It uses only XGBoost for modeling, Optuna f
 - One shared deterministic fold assignment for every Optuna trial
 - Best model selected from combined out-of-fold predictions
 - Optional caller-provided folds and numeric monotonicity constraints
+- Optional regression target transformation (`log`, `sqrt`, `cbrt`) with predictions inverted back to the original scale when saved and when scoring new data
+- Optional XGBoost `objective` override (e.g., `reg:gamma`); when the target contains zeros a +1 shift is applied automatically and inverted on predictions
 - **Iterative optimization with automatic variable selection**: each iteration can run up to three sub-rounds — Round 1 (hyper-parameters), an optional Round 1b importance-based backward elimination, and Round 2 (Optuna feature selection) — and carries the winning configuration forward. An optional **bottom-up variable reduction** step (iteration 1 only) drops low-importance predictors and seeds Round 2 from the survivor model. An optional **multimodel variable reduction** pre-iteration stage splits predictors into random low-overlap groups, fits one model per group, averages SHAP-based importance, excludes the bottom predictors, and releases the top survivors across iteration 1 and iteration 2.
 - Native XGBoost missing-value routing: predictor nulls are not imputed and rows are not dropped
 - Native categorical features with stable pandas category domains
@@ -120,7 +122,11 @@ The fields controlling the behavior:
 | `iterations` | int | `1` | Number of refinement iterations |
 | `refine_factor` | float | `0.5` | Fraction to narrow the Round 1 hyper-parameter search space each iteration (0 < value <= 1) |
 | `feature_selection_trials` | int | `n_trials` | Optuna trials for the feature-selection round (defaults to `n_trials` when omitted) |
-| `max_selected_features` | int | none | Optional cap on how many features Round 2 can select || `max_run_seconds` | float | none | Optional wall-clock budget for the whole iterative optimization. After each iteration completes, the elapsed run time is compared against this value and the remaining iterations are skipped (the current best is kept). `none` means no run-time limit. || `round1b_iterations` | int | `1` | Number of iterations (from iteration 1) in which the importance-based backward elimination (round1b) runs. `0` disables it; `1` runs it only in the first iteration; values > 1 run it in the first N iterations. Features eliminated by round1b are permanently removed from the Round 2 candidate pool in every later iteration. |
+| `max_selected_features` | int | none | Optional cap on how many features Round 2 can select |
+| `max_run_seconds` | float | none | Optional wall-clock budget for the whole iterative optimization. After each iteration completes, the elapsed run time is compared against this value and the remaining iterations are skipped (the current best is kept). `none` means no run-time limit. |
+| `target_transform` | str | `none` | Regression target transformation applied before fitting: `none`, `log` (log1p, requires a non-negative target), `sqrt` (requires non-negative), or `cbrt` (cube root, handles any real value). Predictions are inverted back to the original scale when saved and when scoring new data. Ignored for classification. |
+| `objective` | str | none | XGBoost objective overriding the regression default `reg:squarederror` or the classification default `binary:logistic`. When set to `reg:gamma` and the target contains zeros, a +1 shift is automatically applied to the target so it is strictly positive, and predictions are shifted back (-1) when saved and when scoring. Ignored when `target_transform` is set explicitly. |
+| `round1b_iterations` | int | `1` | Number of iterations (from iteration 1) in which the importance-based backward elimination (round1b) runs. `0` disables it; `1` runs it only in the first iteration; values > 1 run it in the first N iterations. Features eliminated by round1b are permanently removed from the Round 2 candidate pool in every later iteration. |
 | `bottom_up_variable_reduction` | bool | `false` | Enable the bottom-up importance-threshold reduction in iteration 1 |
 | `bottom_up_n_trials` | int | none | Optuna trials for Round 1 of iteration 1 when bottom-up reduction is active (falls back to `n_trials` when unset) |
 | `bottom_up_importance_threshold` | float | none | XGBoost variable-importance threshold below which predictors are dropped by the bottom-up reduction (importances normalized to sum to 1). When unset, the threshold is computed dynamically from the number of predictors as `(1 / n_predictors) / 2` (half the average importance); set an explicit float to use a fixed threshold instead. |
@@ -148,6 +154,7 @@ feature_selection: true
 feature_selection_trials: 30
 max_selected_features: 5
 max_run_seconds: 3600            # stop iterations after 1 hour wall-clock
+target_transform: log              # log-transform the regression target
 round1b_iterations: 1          # run round1b only in iteration 1
 bottom_up_variable_reduction: true   # importance-threshold reduction in iteration 1
 bottom_up_n_trials: 60           # more Round1 trials in iteration 1
@@ -179,6 +186,7 @@ result = run_automl(AutoMLConfig(
     feature_selection_trials=20,
     max_selected_features=3,
     max_run_seconds=3600,
+    target_transform="log",
     round1b_iterations=1,
     bottom_up_variable_reduction=True,
     bottom_up_n_trials=40,

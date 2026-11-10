@@ -58,6 +58,13 @@ def score_saved_model(
         model.load_model(model_path)
         if task == "regression":
             prediction = np.asarray(model.predict(features), dtype=float)
+            # Invert predictions back to the original target scale when a
+            # target transformation chain was applied during training.
+            target_transforms = metadata.get("target_transforms") or []
+            if target_transforms:
+                from .transforms import invert_transform_chain
+
+                prediction = invert_transform_chain(prediction, target_transforms)
             output = pd.DataFrame(
                 {"row_id": np.arange(len(features), dtype=np.int64), "prediction": prediction}
             )

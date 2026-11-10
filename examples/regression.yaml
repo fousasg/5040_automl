@@ -7,10 +7,10 @@ algorithms: [xgboost]
 n_folds: 4
 n_trials: 10
 seed: 42
-output_dir: ../runs/regression
+output_dir: ../runs/regression_gam_log
 output_format: csv
 explain_sample_size: 80
-n_jobs: -1
+n_jobs: 8
 
 # Monotonicity constraints (optional):
 # 1 = monotonically increasing, -1 = monotonically decreasing
@@ -18,12 +18,22 @@ n_jobs: -1
 monotonicity_constraints:
   tenure: 1
 
+# Optional regression target transformation (applied before fitting; predictions
+# are inverted back to the original scale when saved and when scoring).
+# target_transform: log        # log (log1p, non-negative), sqrt (non-negative), cbrt (any), none
+
+# Optional XGBoost objective overriding the regression default (reg:squarederror).
+# When set to reg:gamma and the target contains zeros, a +1 shift is
+# automatically applied to the target so it is strictly positive,
+# and predictions are shifted back (-1) when saved and when scoring.
+# objective: reg:gamma
+
 # Feature selection / iterative optimization (optional):
 iterations: 10
 refine_factor: 0.9        # narrow round1 search space by 10% each iteration
 feature_selection: true
 feature_selection_trials: 10
-max_selected_features: 3
+max_selected_features: 5
 
 # Round1b: importance-based backward elimination (optional).
 # Number of iterations (from iteration 1) in which round1b runs.

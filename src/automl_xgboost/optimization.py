@@ -28,6 +28,18 @@ from .modeling import (
 from .recording import TrialRecorder
 
 
+def _actual_target(data: PreparedData, config: AutoMLConfig) -> np.ndarray:
+    """Return the target array CV scores are computed against.
+
+    For regression the original target is used (predictions are inverted to the
+    original scale by ``cross_validated_predictions``); for classification the
+    0/1 encoded target is used.
+    """
+    if config.task == "regression":
+        return data.target.to_numpy(dtype=float)
+    return data.encoded_target.to_numpy(dtype=float)
+
+
 # Number of consecutive failed feature-removal attempts tolerated before the
 # importance-based backward elimination stops. A failure does not abort the
 # search; the next least-important feature is tried instead.
@@ -83,7 +95,14 @@ def cross_validated_predictions(
     parameters: dict[str, Any],
     selected_features: list[str] | None = None,
 ) -> np.ndarray:
-    """Fit one model per shared fold and return predictions in original row order."""
+    """Fit one model per shared fold and return predictions in original row order.
+
+    Predictions are returned in the original target scale: when a regression
+    target transformation chain is configured, the model is fit on the transformed
+    target but the holdout predictions are inverted back to the original scale
+    so every CV score is computed against the original actuals.
+    """
+    from .transforms import invert_transform_chain
 
     features = data.features if selected_features is None else data.features[selected_features]
     predictions = np.full(len(features), np.nan, dtype=float)
@@ -103,6 +122,8 @@ def cross_validated_predictions(
         )
     if not np.isfinite(predictions).all():
         raise TrainingError("cross-validation did not produce one finite prediction per row")
+    if config.task == "regression" and data.target_transforms:
+        predictions = invert_transform_chain(predictions, data.target_transforms)
     return predictions
 
 
@@ -153,7 +174,7 @@ def optimize(
             predictions = cross_validated_predictions(data, config, parameters, selected_features)
             score = score_predictions(
                 metric,
-                data.encoded_target.to_numpy(dtype=float),
+                _actual_target(data, config),
                 predictions,
             )
             trial.set_user_attr("cv_score", score)
@@ -236,7 +257,7 @@ def refit_best(
 
     selected = outcome.selected_features
     oof = cross_validated_predictions(data, config, outcome.best_parameters, selected)
-    score = score_predictions(metric, data.encoded_target.to_numpy(dtype=float), oof)
+    score = score_predictions(metric, _actual_target(data, config), oof)
     if not math.isclose(
         score,
         outcome.best_score,
@@ -337,7 +358,7 @@ def run_feature_selection(
                 predictions = cross_validated_predictions(data, config, best_parameters, selected)
                 raw_score = score_predictions(
                     metric,
-                    data.encoded_target.to_numpy(dtype=float),
+                    _actual_target(data, config),
                     predictions,
                 )
             except Exception as exc:
@@ -513,7 +534,7 @@ def run_round1b_elimination(
                 data, config, best_parameters, candidate
             )
             score = score_predictions(
-                metric, data.encoded_target.to_numpy(dtype=float), predictions
+                metric, _actual_target(data, config), predictions
             )
         except Exception as exc:
             logger.warning(
@@ -626,7 +647,7 @@ def run_bottom_up_reduction(
         return list(active_features), float(base_score)
 
     predictions = cross_validated_predictions(data, config, best_parameters, survivors)
-    score = score_predictions(metric, data.encoded_target.to_numpy(dtype=float), predictions)
+    score = score_predictions(metric, _actual_target(data, config), predictions)
     logger.info(
         "bottom-up reduction: dropped %d/%d features below threshold %.6f: %s",
         len(dropped), len(active_features), threshold, ",".join(dropped),

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,7 @@ class PreparedData:
     class_levels: list[Any] | None
     category_levels: dict[str, list[str]]
     missing_counts: dict[str, int]
+    target_transforms: list[str] = field(default_factory=list)
 
 
 def load_dataset(dataset: Path | pd.DataFrame) -> pd.DataFrame:
@@ -61,12 +62,29 @@ def prepare_data(frame: pd.DataFrame, config: AutoMLConfig) -> PreparedData:
     if target.isna().any():
         raise DataValidationError("target contains null values; only predictor nulls are supported")
     class_levels: list[Any] | None = None
+    transform_chain: list[str] = []
     if config.task == "regression":
         if not pd.api.types.is_numeric_dtype(target):
             raise DataValidationError("regression target must be numeric")
         if not np.isfinite(target.to_numpy(dtype=float)).all():
             raise DataValidationError("regression target must be finite")
-        encoded_target = target.astype(float)
+        from .transforms import (
+            apply_transform_chain,
+            build_target_transform_chain,
+            validate_chain,
+        )
+
+        target_values = target.to_numpy(dtype=float)
+        target_has_zeros = bool(np.any(target_values == 0))
+        transform_chain = build_target_transform_chain(
+            config.target_transform, config.objective, target_has_zeros
+        )
+        validate_chain(target_values, transform_chain)
+        encoded_target = pd.Series(
+            apply_transform_chain(target_values, transform_chain),
+            name=target.name,
+            index=target.index,
+        )
     else:
         values = list(pd.unique(target))
         if len(values) != 2:
@@ -136,6 +154,7 @@ def prepare_data(frame: pd.DataFrame, config: AutoMLConfig) -> PreparedData:
         class_levels=class_levels,
         category_levels=category_levels,
         missing_counts=missing_counts,
+        target_transforms=transform_chain,
     )
 
 
