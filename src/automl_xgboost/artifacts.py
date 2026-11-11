@@ -26,6 +26,9 @@ OWNED_FILES = {
     "model_metadata.json", "actual_vs_predicted.png", "confusion_matrix.png",
     "partial_dependence_top10.png", "variable_importance.csv", "variable_importance.parquet",
     "variable_importance.png", "optuna.db", "run.log",
+    # Written only when multimodel variable reduction runs; must be cleaned up
+    # on overwrite so a later run cannot advertise a stale importance table.
+    "multimodel_importance.csv",
 }
 OWNED_DIRECTORIES = {"shap_assets"}
 

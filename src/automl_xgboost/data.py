@@ -75,9 +75,8 @@ def prepare_data(frame: pd.DataFrame, config: AutoMLConfig) -> PreparedData:
         )
 
         target_values = target.to_numpy(dtype=float)
-        target_has_zeros = bool(np.any(target_values == 0))
         transform_chain = build_target_transform_chain(
-            config.target_transform, config.objective, target_has_zeros
+            config.target_transform, config.objective, float(np.min(target_values))
         )
         validate_chain(target_values, transform_chain)
         encoded_target = pd.Series(

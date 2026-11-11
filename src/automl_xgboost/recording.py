@@ -22,8 +22,17 @@ class TrialRecorder:
     """Collects one row per trial from every study in a run."""
 
     def __init__(self, config: AutoMLConfig) -> None:
-        self.iterative = config.iterations > 1 or config.feature_selection
+        self.iterative = (
+            config.iterations > 1
+            or config.feature_selection
+            or config.bottom_up_variable_reduction
+            or config.multimodel_variable_reduction
+        )
         self.rows: list[dict[str, Any]] = []
+        # Round 1b reuses small step indices (0, 1, 2, ...) that would collide
+        # with real Optuna trial numbers in the same iteration, so the exported
+        # trial_number is a monotonic counter rather than a derived value.
+        self._next_trial_number = 0
 
     def add(
         self,
@@ -35,7 +44,8 @@ class TrialRecorder:
         penalized_score: float | None,
         selected_features: list[str] | None,
     ) -> None:
-        unique = iteration * 10_000 + trial.number if self.iterative else trial.number
+        unique = self._next_trial_number
+        self._next_trial_number += 1
         self.rows.append(
             {
                 "trial_number": unique,
@@ -55,15 +65,17 @@ class TrialRecorder:
         return pd.DataFrame(self.rows)
 
 
-def merge_trials_dataframe(
-    studies: list[tuple[str, int, Any]], *, iterative: bool
-) -> pd.DataFrame:
+def merge_trials_dataframe(studies: list[tuple[str, int, Any]]) -> pd.DataFrame:
     """Fallback rebuild directly from the Optuna studies when no recorder exists."""
 
     rows: list[dict[str, Any]] = []
+    counter = 0
     for round_name, iteration, study in studies:
         for trial in study.trials:
-            unique = iteration * 10_000 + trial.number if iterative else trial.number
+            # Sequential across all studies: per-round step indices are small
+            # and would otherwise repeat within the same iteration.
+            unique = counter
+            counter += 1
             raw = trial.user_attrs.get("cv_score")
             if raw is None:
                 raw = trial.value if trial.user_attrs.get("selected_features") is not None else None
@@ -92,6 +104,41 @@ def merge_trials_dataframe(
     return pd.DataFrame(rows)
 
 
+def _write_placeholder_png(path: Any, scorer: str) -> Any:
+    """Render a real (not zero-byte) PNG when no trial ever completed.
+
+    The artifact inventory promises a PNG, so an empty file would make
+    downstream viewers show a broken image.
+    """
+
+    import os
+    from pathlib import Path
+
+    path = Path(path)
+    try:
+        os.environ.setdefault("MPLCONFIGDIR", str(path.parent / ".matplotlib"))
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        ax.text(
+            0.5, 0.5, "No completed trials",
+            ha="center", va="center", fontsize=14, color="gray",
+            transform=ax.transAxes,
+        )
+        ax.set(title=f"XGBoost cross-validation: {scorer}", xticks=[], yticks=[])
+        fig.tight_layout()
+        fig.savefig(path, dpi=120)
+        plt.close(fig)
+    except Exception as exc:
+        raise ArtifactError(f"could not create optimization PNG: {exc}") from exc
+    finally:
+        shutil.rmtree(path.parent / ".matplotlib", ignore_errors=True)
+    return path
+
+
 def write_trials_artifacts(
     trials_frame: pd.DataFrame,
     scorer: str,
@@ -108,18 +155,20 @@ def write_trials_artifacts(
     import os
     from pathlib import Path
 
+    from .artifacts import atomic_text
+
     run_dir = Path(run_dir)
     trials_path = run_dir / "trials.csv"
-    trials_frame.to_csv(trials_path, index=False)
+    # Atomic: a crash mid-write must not leave a truncated trials.csv behind.
+    atomic_text(trials_path, trials_frame.to_csv(index=False))
 
     complete = trials_frame[
         (trials_frame["state"] == "COMPLETE") & trials_frame["penalized_score"].notna()
     ]
     if complete.empty:
         history = run_dir / "optimization_history.html"
-        history.write_text("<html><body><p>No completed trials.</p></body></html>")
-        progress = run_dir / "optimization_progress.png"
-        progress.write_bytes(b"")
+        atomic_text(history, "<html><body><p>No completed trials.</p></body></html>")
+        progress = _write_placeholder_png(run_dir / "optimization_progress.png", scorer)
         return trials_path, history, progress
 
     complete = complete.sort_values(["iteration", "round", "trial_number_within_round"]).copy()

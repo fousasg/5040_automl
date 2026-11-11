@@ -49,17 +49,9 @@ def predict_for_score(model: Any, features: pd.DataFrame, task: str) -> np.ndarr
 
 
 def suggest_parameters(trial: Any) -> dict[str, Any]:
-    return {
-        "n_estimators": trial.suggest_int("n_estimators", 50, 500),
-        "max_depth": trial.suggest_int("max_depth", 2, 12),
-        "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
-        "min_child_weight": trial.suggest_float("min_child_weight", 1e-2, 100.0, log=True),
-        "subsample": trial.suggest_float("subsample", 0.5, 1.0),
-        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-        "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 100.0, log=True),
-        "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 100.0, log=True),
-        "gamma": trial.suggest_float("gamma", 0.0, 10.0),
-    }
+    """Sample hyperparameters from the default search space."""
+
+    return suggest_from_state(trial, SEARCH_SPACE_DEFAULTS)
 
 
 SEARCH_SPACE_DEFAULTS: dict[str, dict[str, Any]] = {
@@ -94,7 +86,10 @@ def suggest_from_state(trial: Any, search_state: dict[str, dict[str, Any]]) -> d
         high = spec["high"]
         if kind == "int":
             step = spec.get("step", 1)
-            params[key] = trial.suggest_int(key, int(low), int(high), step=step)
+            if step and step != 1:
+                params[key] = trial.suggest_int(key, int(low), int(high), step=step)
+            else:
+                params[key] = trial.suggest_int(key, int(low), int(high))
         else:
             params[key] = trial.suggest_float(key, float(low), float(high), log=spec.get("log", False))
     return params

@@ -50,8 +50,13 @@ ELIMINATION_FAILURE_PATIENCE = 3
 class OptimizationOutcome:
     study: Any
     best_parameters: dict[str, Any]
+    # Raw CV score in the original target scale; this is what ``refit_best``
+    # recomputes and verifies.
     best_score: float
     best_trial_number: int
+    # Optuna-comparison score (raw score scaled by the feature-count penalty).
+    # Equal to ``best_score`` whenever no feature cap was exceeded.
+    best_penalized_score: float | None = None
     selected_features: list[str] | None = None
     recorder_rows: pd.DataFrame | None = None
     studies_history: list[tuple[str, int, Any]] | None = None
@@ -69,6 +74,26 @@ def _format_search_bounds(search_state: dict[str, dict[str, Any]]) -> str:
         f"{key}=[{spec['low']:.6g},{spec['high']:.6g}]"
         for key, spec in sorted(search_state.items())
     )
+
+
+def feature_penalty(
+    score: float,
+    n_features: int,
+    max_selected: int | None,
+    direction: Direction,
+) -> float:
+    """Return the Optuna-comparison score for a raw CV score.
+
+    Scores are only ever compared in this penalized space; the raw score is
+    what gets reported, verified by ``refit_best`` and stored in
+    ``OptimizationOutcome.best_score``.
+    """
+    if max_selected is None or n_features <= max_selected:
+        return score
+    multiplier = (n_features - max_selected) + 1
+    if direction == "minimize":
+        return score * multiplier
+    return score / multiplier
 
 
 def create_study(config: AutoMLConfig, metric: MetricSpec, run_dir: Path, run_id: str) -> tuple[Any, Path | None]:
@@ -146,19 +171,13 @@ def optimize(
 
     if seed_params is not None:
         study.enqueue_trial(dict(seed_params))
-        logger.info("round1 seeded with incumbent params=%s", _format_params(seed_params))
+        logger.info("%s seeded with incumbent params=%s", round_name, _format_params(seed_params))
 
     n_features = len(selected_features) if selected_features is not None else len(config.predictors)
     max_selected = config.max_selected_features
 
     def _apply_feature_penalty(score: float) -> float:
-        if max_selected is None or n_features <= max_selected:
-            return score
-        excess = n_features - max_selected
-        multiplier = excess + 1
-        if metric.direction == "minimize":
-            return score * multiplier
-        return score / multiplier
+        return feature_penalty(score, n_features, max_selected, metric.direction)
 
     def objective(trial: Any) -> float:
         parameters = suggest_from_state(trial, search_state) if search_state is not None else suggest_parameters(trial)
@@ -241,7 +260,13 @@ def optimize(
         float(best.value),
         _format_params(parameters),
     )
-    outcome = OptimizationOutcome(study, parameters, float(raw_score), best.number)
+    outcome = OptimizationOutcome(
+        study,
+        parameters,
+        float(raw_score),
+        best.number,
+        best_penalized_score=float(best.value),
+    )
     if recorder is not None:
         outcome.recorder_rows = recorder.dataframe()
     return outcome
@@ -285,7 +310,13 @@ def run_feature_selection(
     logger: logging.Logger,
     shared_study: Any | None = None,
     recorder: TrialRecorder | None = None,
-) -> tuple[list[str], float]:
+) -> tuple[list[str], float, float]:
+    """Run the Round 2 feature-selection study.
+
+    Returns ``(selected_features, penalized_score, raw_score)`` where the
+    penalized score is the Optuna-comparison value (raw score scaled by the
+    ``max_selected_features`` penalty) and the raw score is in the target scale.
+    """
     import optuna
 
     n_trials = config.feature_selection_trials or config.n_trials
@@ -377,13 +408,8 @@ def run_feature_selection(
                 )
                 return worst_score(metric.direction)
 
-        score = raw_score
-        if cap_violation > 0.0:
-            penalty_multiplier = int(cap_violation) + 1
-            if metric.direction == "minimize":
-                score = raw_score * penalty_multiplier
-            else:
-                score = raw_score / penalty_multiplier
+        trial.set_user_attr("cv_score", float(raw_score))
+        score = feature_penalty(raw_score, len(selected), max_selected, metric.direction)
         if recorder is not None:
             recorder.add(
                 trial,
@@ -433,7 +459,11 @@ def run_feature_selection(
             "feature-selection iteration %d: no scored trials, keeping %d active features",
             iteration, len(active_features),
         )
-        return list(active_features), base_score
+        return (
+            list(active_features),
+            feature_penalty(base_score, len(active_features), max_selected, metric.direction),
+            base_score,
+        )
 
     best_trial = min(complete, key=lambda t: t.value) if metric.direction == "minimize" else max(complete, key=lambda t: t.value)
     best_selected = best_trial.user_attrs.get("selected_features", active_features)
@@ -442,13 +472,21 @@ def run_feature_selection(
             "feature selection iteration %d: winning subset empty, keeping %d active features",
             iteration, len(active_features),
         )
-        return list(active_features), base_score
+        return (
+            list(active_features),
+            feature_penalty(base_score, len(active_features), max_selected, metric.direction),
+            base_score,
+        )
 
+    best_raw_score = best_trial.user_attrs.get("cv_score")
+    if best_raw_score is None:
+        best_raw_score = base_score
     logger.info(
-        "feature selection iteration %d winner: trial=%d score=%.6f features=%s",
-        iteration, best_trial.number, float(best_trial.value), ",".join(best_selected),
+        "feature selection iteration %d winner: trial=%d score=%.6f raw=%.6f features=%s",
+        iteration, best_trial.number, float(best_trial.value), float(best_raw_score),
+        ",".join(best_selected),
     )
-    return list(best_selected), float(best_trial.value)
+    return list(best_selected), float(best_trial.value), float(best_raw_score)
 
 
 def run_round1b_elimination(
@@ -886,9 +924,11 @@ def run_multimodel_variable_reduction(
     exclude_count = config._multimodel_exclude_count(len(predictors))
     ranked = sorted(predictors, key=lambda feature: (-avg_importance[feature], feature))
     bottom_n = ranked[-exclude_count:] if exclude_count else []
-    survivors = [feature for feature in ranked if feature not in set(bottom_n)]
+    excluded = set(bottom_n)
+    survivors = [feature for feature in ranked if feature not in excluded]
     top_k = survivors[: config.multimodel_top_k]
-    rest = [feature for feature in survivors if feature not in set(top_k)]
+    top_k_set = set(top_k)
+    rest = [feature for feature in survivors if feature not in top_k_set]
     logger.info(
         "multimodel variable reduction finished: excluded %d bottom predictors, "
         "survivors=%d (top_k=%d for iteration 1, rest=%d for iteration 2 round 2)",
@@ -923,7 +963,11 @@ def run_iterative_optimization(
 
     active_features: list[str] = list(config.predictors)
     best_params: dict[str, Any] | None = None
+    # Raw CV score (target scale) of the global best configuration. This is what
+    # ``refit_best`` recomputes, so it must never hold a penalized value.
     best_score: float | None = None
+    # Penalized score (Optuna-comparison scale) of the global best configuration.
+    best_penalized: float | None = None
     best_trial_number: int = 0
     best_features: list[str] = list(config.predictors)
     last_study: Any = None
@@ -989,13 +1033,7 @@ def run_iterative_optimization(
         logger.info("created shared round2 study for feature selection across iterations")
 
     def _penalize(score: float, n_features: int) -> float:
-        if max_selected is None or n_features <= max_selected:
-            return score
-        excess = n_features - max_selected
-        multiplier = excess + 1
-        if metric.direction == "minimize":
-            return score * multiplier
-        return score / multiplier
+        return feature_penalty(score, n_features, max_selected, metric.direction)
 
     for iteration in range(1, config.iterations + 1):
         iteration_started = time.perf_counter()
@@ -1056,7 +1094,10 @@ def run_iterative_optimization(
         )
 
         iter_params = round1_params
-        iter_score = round1_penalized
+        # ``iter_penalized`` drives all selection decisions; ``iter_raw`` is the
+        # score that gets reported and verified against the refit.
+        iter_penalized = round1_penalized
+        iter_raw = round1_raw_score
         iter_features = list(active_features)
         iter_trial = round1_outcome.best_trial_number
 
@@ -1086,7 +1127,9 @@ def run_iterative_optimization(
             # The survivors become the active set for round2 and all future rounds.
             active_features = list(r1b_features)
             iter_features = list(r1b_features)
-            iter_score = _penalize(r1b_score, len(r1b_features))
+            iter_penalized = _penalize(r1b_score, len(r1b_features))
+            iter_raw = r1b_score
+            iter_trial = round1_outcome.best_trial_number
             # Round 2 anchors on the post-elimination baseline.
             round1_raw_score = r1b_score
             logger.info(
@@ -1135,7 +1178,8 @@ def run_iterative_optimization(
             # re-selected if doing so improves the score.
             active_features = list(bu_features)
             iter_features = list(bu_features)
-            iter_score = _penalize(bu_score, len(bu_features))
+            iter_penalized = _penalize(bu_score, len(bu_features))
+            iter_raw = bu_score
             iter_trial = round1_outcome.best_trial_number
             round1_raw_score = bu_score
             logger.info(
@@ -1145,12 +1189,13 @@ def run_iterative_optimization(
             )
             # The bottom-up model becomes the global best / Round 2 starting point.
             best_params = round1_params
-            best_score = iter_score
+            best_score = bu_score
+            best_penalized = iter_penalized
             best_trial_number = iter_trial
             best_features = list(bu_features)
             logger.info(
-                "iteration %d: bottom-up model adopted as global best score=%.6f",
-                iteration, best_score,
+                "iteration %d: bottom-up model adopted as global best raw=%.6f penalized=%.6f",
+                iteration, best_score, best_penalized,
             )
 
         # When feature selection is disabled, Round 2 never runs, so it can
@@ -1173,7 +1218,7 @@ def run_iterative_optimization(
                 iteration, config.iterations, len(round2_candidates),
                 len(active_features),
             )
-            r2_features, r2_score = run_feature_selection(
+            r2_features, r2_score, r2_raw_score = run_feature_selection(
                 data, config, metric, round1_params, round1_raw_score,
                 all_features=round2_candidates,
                 active_features=active_features,
@@ -1183,12 +1228,13 @@ def run_iterative_optimization(
                 recorder=recorder,
             )
             logger.info(
-                "iteration %d round2 best score: %.6f with %d features: %s",
-                iteration, r2_score, len(r2_features), ",".join(r2_features),
+                "iteration %d round2 best score: penalized=%.6f raw=%.6f with %d features: %s",
+                iteration, r2_score, r2_raw_score, len(r2_features), ",".join(r2_features),
             )
-            if is_better(r2_score, iter_score, metric.direction):
+            if is_better(r2_score, iter_penalized, metric.direction):
                 iter_features = r2_features
-                iter_score = r2_score
+                iter_penalized = r2_score
+                iter_raw = r2_raw_score
                 logger.info("iteration %d: round2 wins", iteration)
                 prev_round2_won = True
             else:
@@ -1215,16 +1261,20 @@ def run_iterative_optimization(
                 iteration, _format_search_bounds(search_state),
             )
 
-        if is_better(iter_score, best_score, metric.direction):
+        if is_better(iter_penalized, best_penalized, metric.direction):
             best_params = iter_params
-            best_score = iter_score
+            best_score = iter_raw
+            best_penalized = iter_penalized
             best_trial_number = iter_trial
             best_features = list(iter_features)
-            logger.info("iteration %d: new global best score %.6f", iteration, best_score)
+            logger.info(
+                "iteration %d: new global best score raw=%.6f penalized=%.6f",
+                iteration, best_score, best_penalized,
+            )
 
         logger.info(
             "iteration %d complete in %.1fs: score=%.6f global_best=%.6f",
-            iteration, time.perf_counter() - iteration_started, iter_score, best_score,
+            iteration, time.perf_counter() - iteration_started, iter_raw, best_score,
         )
 
         # Stop the remaining iterations when the wall-clock run budget is exceeded.
@@ -1242,8 +1292,13 @@ def run_iterative_optimization(
         raise TrainingError("no iteration completed successfully")
 
     logger.info(
-        "iterative optimization finished: best_score=%.6f best_trial=%d features=%s params=%s",
-        best_score, best_trial_number, ",".join(best_features), _format_params(best_params),
+        "iterative optimization finished: best_score=%.6f penalized=%.6f best_trial=%d "
+        "features=%s params=%s",
+        best_score,
+        best_penalized if best_penalized is not None else best_score,
+        best_trial_number,
+        ",".join(best_features),
+        _format_params(best_params),
     )
 
     if config.feature_selection and r2_shared_study is not None:
@@ -1254,7 +1309,16 @@ def run_iterative_optimization(
         best_parameters=best_params,
         best_score=best_score,
         best_trial_number=best_trial_number,
-        selected_features=best_features if config.feature_selection else None,
+        best_penalized_score=best_penalized,
+        selected_features=(
+            best_features
+            if (
+                config.feature_selection
+                or config.bottom_up_variable_reduction
+                or config.multimodel_variable_reduction
+            )
+            else None
+        ),
         recorder_rows=recorder.dataframe(),
         studies_history=trials_history,
     )

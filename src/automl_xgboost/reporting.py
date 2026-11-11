@@ -74,8 +74,10 @@ def write_shap_report(
     display_data = data.features.iloc[indices].copy()
     for column in data.category_levels:
         display_data[column] = display_data[column].astype("string").fillna("<missing>")
-    values = shap_frame.loc[indices, config.predictors].to_numpy()
-    bases = shap_frame.loc[indices, "BiasTerm"].to_numpy()
+    # ``indices`` is positional, so select by position: ``.loc`` would break
+    # whenever shap_frame carries a non-RangeIndex.
+    values = shap_frame.iloc[indices][config.predictors].to_numpy()
+    bases = shap_frame.iloc[indices]["BiasTerm"].to_numpy()
     sampled = shap.Explanation(
         values=values,
         base_values=bases,

@@ -83,14 +83,25 @@ def run_automl(config: AutoMLConfig | dict[str, Any]) -> AutoMLResult:
         folds_frame = pd.DataFrame({"row_id": data.row_ids, "fold": data.fold_values})
         folds_path = write_dataframe(folds_frame, run_dir / "folds", config.output_format)
 
-        study, optuna_database = create_study(config, metric, run_dir, run_id)
-        use_iterative = config.iterations > 1 or config.feature_selection
+        # Every reduction stage needs the iterative driver, so the branch must
+        # not depend on ``feature_selection`` alone: bottom-up and multimodel
+        # reduction would otherwise be silently ignored.
+        use_iterative = (
+            config.iterations > 1
+            or config.feature_selection
+            or config.bottom_up_variable_reduction
+            or config.multimodel_variable_reduction
+        )
         optimization_started = time.perf_counter()
         logger.info("optimization started: iterative=%s", use_iterative)
         if use_iterative:
             outcome = run_iterative_optimization(data, config, metric, run_dir, run_id, logger)
-            optuna_database = None
+            # Iterative rounds create their own studies; keep the persisted
+            # database in the manifest when one was written.
+            default_database = run_dir / "optuna.db"
+            optuna_database = default_database if default_database.is_file() else None
         else:
+            study, optuna_database = create_study(config, metric, run_dir, run_id)
             outcome = optimize(study, data, config, metric, run_id, logger)
         logger.info(
             "optimization completed in %.1fs: best_score=%.6f best_trial=%d selected_features=%s",
@@ -104,9 +115,7 @@ def run_automl(config: AutoMLConfig | dict[str, Any]) -> AutoMLResult:
             trials_frame = outcome.recorder_rows
         else:
             studies = outcome.studies_history or [("single", 1, outcome.study)]
-            trials_frame = merge_trials_dataframe(
-                studies, iterative=config.iterations > 1 or config.feature_selection
-            )
+            trials_frame = merge_trials_dataframe(studies)
         trials_path, history_path, progress_path = write_trials_artifacts(
             trials_frame, config.scorer, metric.direction, run_dir
         )
@@ -246,11 +255,16 @@ def run_automl(config: AutoMLConfig | dict[str, Any]) -> AutoMLResult:
         inventory.extend((asset, "image/png", None) for asset in report_assets)
         if optuna_database:
             inventory.append((optuna_database, "application/vnd.sqlite3", None))
-        manifest_path = write_manifest(run_dir, inventory, run_id)
+        # Log the completion line before the manifest is written: the manifest
+        # records the sha256 of run.log, so writing it first would hash a log
+        # that is still missing its final line.
         logger.info(
             "run_completed total_duration=%.1fs artifacts=%d",
             time.perf_counter() - run_started_perf, len(inventory),
         )
+        for handler in logger.handlers:
+            handler.flush()
+        manifest_path = write_manifest(run_dir, inventory, run_id)
         close_logger(logger)
         logger_closed = True
         artifacts = AutoMLArtifacts(
@@ -334,6 +348,7 @@ def _versions() -> dict[str, str]:
 
 
 def _slice_data(data: PreparedData, selected_features: list[str]) -> PreparedData:
+    wanted = set(selected_features)
     return PreparedData(
         source=data.source,
         features=data.features[selected_features].copy(),
@@ -344,6 +359,10 @@ def _slice_data(data: PreparedData, selected_features: list[str]) -> PreparedDat
         fold_codes=data.fold_codes,
         fold_mapping=data.fold_mapping,
         class_levels=data.class_levels,
-        category_levels={k: v for k, v in data.category_levels.items() if k in set(selected_features)},
-        missing_counts={k: v for k, v in data.missing_counts.items() if k in set(selected_features)},
+        # Carry the transform chain: dropping it made refits on sliced feature
+        # sets train on transformed labels but report original-scale metrics
+        # (and skip the inverse transform for gamma/log targets).
+        target_transforms=list(data.target_transforms),
+        category_levels={k: v for k, v in data.category_levels.items() if k in wanted},
+        missing_counts={k: v for k, v in data.missing_counts.items() if k in wanted},
     )

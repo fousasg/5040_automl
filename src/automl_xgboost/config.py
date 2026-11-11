@@ -37,10 +37,11 @@ class AutoMLConfig(BaseModel):
     positive_class: str | int | float | bool | None = None
     # Optional XGBoost objective overriding the regression default ``reg:squarederror``
     # or the classification default ``binary:logistic``. When set to
-    # ``reg:gamma`` and the target contains zeros, a +1 shift is automatically
-    # applied to the target so it is strictly positive, and predictions are
-    # shifted back (-1) when saved and when scoring. Ignored when ``target_transform`` is
-    # set explicitly.
+    # ``reg:gamma`` and the target has non-positive labels, the target is
+    # shifted so its minimum becomes exactly 1 (the shift is 1 when the
+    # minimum is 0, and larger when negative labels are present), and
+    # predictions are shifted back when saved and when scoring. Ignored when
+    # ``target_transform`` is set explicitly.
     objective: str | None = None
     # Optional transformation applied to a continuous (regression) target
     # before fitting: ``none`` (default), ``log`` (log1p, requires a non-negative
@@ -131,6 +132,14 @@ class AutoMLConfig(BaseModel):
     def normalize_string_enum(cls, value: Any) -> Any:
         return value.lower().strip() if isinstance(value, str) else value
 
+    @field_validator("objective", mode="before")
+    @classmethod
+    def normalize_objective(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
+        return value
+
     @field_validator("target", "fold_column")
     @classmethod
     def non_blank_column(cls, value: str | None) -> str | None:
@@ -158,6 +167,12 @@ class AutoMLConfig(BaseModel):
                 raise ValueError("int multimodel_exclude_bottom must be >= 1")
             return value
         if isinstance(value, float):
+            # YAML/JSON writers often emit whole counts as ``10.0``; treat an
+            # integral float as a count instead of rejecting the run.
+            if value.is_integer():
+                if value < 1:
+                    raise ValueError("int multimodel_exclude_bottom must be >= 1")
+                return int(value)
             if not 0.0 < value < 1.0:
                 raise ValueError("float multimodel_exclude_bottom must be between 0 and 1 (exclusive)")
             return value
@@ -203,6 +218,23 @@ class AutoMLConfig(BaseModel):
             raise ValueError(
                 "target_transform is only supported for regression tasks"
             )
+        if self.objective is not None:
+            # A classification run silently trained a regressor (and vice
+            # versa) before this check, producing meaningless metrics.
+            objective = self.objective.strip()
+            if not objective:
+                raise ValueError("objective cannot be blank")
+            is_classification_objective = objective.startswith(("binary:", "multi:"))
+            if self.task == "classification" and not is_classification_objective:
+                raise ValueError(
+                    f"objective {objective!r} is not a classification objective; "
+                    "classification tasks require a 'binary:*' or 'multi:*' objective"
+                )
+            if self.task == "regression" and is_classification_objective:
+                raise ValueError(
+                    f"objective {objective!r} is not a regression objective; "
+                    "regression tasks require a 'reg:*' objective"
+                )
         # Each predictor appears in `multimodel_variable_appearances` groups across
         # `multimodel_n_models` models, so the average per-model group size is
         # len(predictors) * appearances / n_models. The totals do not have to
@@ -210,6 +242,12 @@ class AutoMLConfig(BaseModel):
         # predictor appears approximately `appearances` times (within ±1),
         # which is the "as stratified as possible" given the counts.
         if self.multimodel_variable_reduction:
+            if self.multimodel_variable_appearances > self.multimodel_n_models:
+                raise ValueError(
+                    f"multimodel_variable_appearances({self.multimodel_variable_appearances}) "
+                    f"cannot exceed multimodel_n_models({self.multimodel_n_models}): "
+                    "a predictor cannot join more groups than exist"
+                )
             if self.multimodel_n_models > len(self.predictors) * self.multimodel_variable_appearances:
                 raise ValueError(
                     "multimodel_n_models cannot exceed the number of "

@@ -50,6 +50,9 @@ def score_saved_model(
     if missing:
         raise DataValidationError(f"scoring dataset is missing predictors: {missing}")
     features = _prepare_features(source, predictors, metadata.get("category_levels") or {})
+    # Keep an explicit row identifier from the input when present, otherwise
+    # fall back to a positional id.
+    row_id = _row_ids(source)
 
     from xgboost import XGBClassifier, XGBRegressor
 
@@ -59,14 +62,17 @@ def score_saved_model(
         if task == "regression":
             prediction = np.asarray(model.predict(features), dtype=float)
             # Invert predictions back to the original target scale when a
-            # target transformation chain was applied during training.
-            target_transforms = metadata.get("target_transforms") or []
+            # target transformation chain was applied during training. Runs
+            # from before the chain existed recorded a single
+            # ``target_transform`` string, so fall back to it when the chain
+            # is absent.
+            target_transforms = _recorded_transforms(metadata)
             if target_transforms:
                 from .transforms import invert_transform_chain
 
                 prediction = invert_transform_chain(prediction, target_transforms)
             output = pd.DataFrame(
-                {"row_id": np.arange(len(features), dtype=np.int64), "prediction": prediction}
+                {"row_id": row_id, "prediction": prediction}
             )
         else:
             class_levels = metadata.get("class_levels")
@@ -76,7 +82,7 @@ def score_saved_model(
             negative, positive = class_levels
             output = pd.DataFrame(
                 {
-                    "row_id": np.arange(len(features), dtype=np.int64),
+                    "row_id": row_id,
                     "predicted_label": np.where(probability >= 0.5, positive, negative),
                     f"probability_{_safe_suffix(str(negative))}": 1.0 - probability,
                     f"probability_{_safe_suffix(str(positive))}": probability,
@@ -91,6 +97,36 @@ def score_saved_model(
 
     written = _write_optional_output(output, output_path)
     return ScoringResult(resolved_run, output, written, model)
+
+
+def _row_ids(source: pd.DataFrame) -> np.ndarray | pd.Series:
+    """Return the row identifiers to emit alongside predictions.
+
+    Uses the input ``row_id`` column when it is present and unique, so scored
+    rows can be joined back to the caller's table.
+    """
+
+    if "row_id" in source.columns:
+        candidate = source["row_id"]
+        if candidate.notna().all() and not candidate.duplicated().any():
+            return candidate.reset_index(drop=True)
+    return np.arange(len(source), dtype=np.int64)
+
+
+def _recorded_transforms(metadata: dict[str, Any]) -> list[str]:
+    """Return the target transform chain recorded in ``model_metadata.json``.
+
+    Newer runs store a list under ``target_transforms``; older ones stored a
+    single name under ``target_transform``.
+    """
+
+    chain = metadata.get("target_transforms")
+    if isinstance(chain, list) and chain:
+        return [str(step) for step in chain]
+    legacy = metadata.get("target_transform")
+    if isinstance(legacy, str) and legacy and legacy != "none":
+        return [legacy]
+    return []
 
 
 def _prepare_features(
